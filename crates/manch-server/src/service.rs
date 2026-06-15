@@ -14,8 +14,7 @@ impl ManchService for ManchServiceImpl {
         &'a self,
         _ctx: RequestContext,
         _request: ServiceRequest<'_, GetVersionRequest>,
-    ) -> ServiceResult<impl connectrpc::Encodable<GetVersionResponse> + Send + use<'a>>
-    {
+    ) -> ServiceResult<impl connectrpc::Encodable<GetVersionResponse> + Send + use<'a>> {
         Response::ok(GetVersionResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
             ..Default::default()
@@ -30,10 +29,9 @@ mod tests {
     /// The test verifies the contract that matters: `get_version` returns a
     /// response whose `version` field equals the crate's `CARGO_PKG_VERSION`.
     ///
-    /// We test this at the level of the extracted `version_string()` helper
-    /// (which contains the logic) plus a smoke-check that the impl wires it
-    /// through, encoded via the binary proto codec, to ensure the full
-    /// round-trip works.
+    /// The test calls `get_version` directly, encodes the opaque response body
+    /// through the binary proto codec, decodes it back to the owned struct, and
+    /// asserts that `version == CARGO_PKG_VERSION`.
     #[tokio::test]
     async fn get_version_returns_cargo_pkg_version() {
         use buffa::{Message as _, MessageView as _, bytes::Bytes};
@@ -46,9 +44,18 @@ mod tests {
         // encoding. We keep the view and bytes in the same scope so the
         // borrowed `ServiceRequest` is valid for the call.
         let body = Bytes::new();
+        // GetVersionRequestView is publicly re-exported at crate::proto::manch::v1
+        // (via `pub use self::__buffa::view::GetVersionRequestView` in the generated
+        // mod.rs), so we use that stable public path instead of the internal
+        // `__buffa::view::` sub-module.
         let view =
-            crate::proto::manch::v1::__buffa::view::GetVersionRequestView::decode_view(&body)
+            crate::proto::manch::v1::GetVersionRequestView::decode_view(&body)
                 .expect("empty buffer is a valid GetVersionRequest");
+        // ServiceRequest::from_parts is #[doc(hidden)] (generated dispatch glue uses
+        // it internally); no public From/new constructor exists on ServiceRequest in
+        // connectrpc 0.7.0. The only alternative would be an encode→decode round-trip
+        // through GetVersionRequestOwnedView::from_owned, but that is heavier without
+        // benefit. We keep from_parts and note the limitation here.
         let req = ServiceRequest::<GetVersionRequest>::from_parts(&view, &body);
 
         let ctx = RequestContext::new(axum::http::HeaderMap::new());

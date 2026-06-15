@@ -13,8 +13,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(|| async { "OK" }))
         .fallback_service(connect.into_axum_service());
 
-    let addr = "127.0.0.1:8787";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let addr = std::env::var("MANCH_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("manch-server listening on http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
