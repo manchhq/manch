@@ -14,3 +14,6 @@ apps/desktop/src-tauri/target/
 
 # Keep file-based router generated tree (committed on purpose)
 !apps/desktop/src/routeTree.gen.ts
+
+# Storybook build output
+storybook-static/
