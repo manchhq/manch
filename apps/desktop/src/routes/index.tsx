@@ -1,28 +1,42 @@
+import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@connectrpc/connect-query";
-import { versionQuery, createManchTransport } from "@manch/api";
-import { VersionBadge } from "@manch/ui";
+import { listConfiguredProviders, type Provider } from "../lib/api";
+import { Settings } from "../components/Settings";
+import { Chat } from "../components/Chat";
 
 export const Route = createFileRoute("/")({
   component: Home,
 });
 
-const transport = createManchTransport();
-
 function Home() {
-  const { data, isLoading, error } = useQuery(versionQuery.getVersion, {}, { transport });
+  const [providers, setProviders] = useState<Provider[] | null>(null);
+
+  async function refresh() {
+    setProviders(await listConfiguredProviders());
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
 
   return (
-    <main className="flex flex-col gap-4">
+    <main className="mx-auto flex max-w-3xl flex-col gap-6">
       <h1 className="text-2xl font-bold">Manch</h1>
-      <div className="flex items-center gap-2">
-        <span>server version:</span>
-        <VersionBadge
-          version={data?.version}
-          loading={isLoading}
-          error={error?.message}
-        />
-      </div>
+      {providers === null ? (
+        <span className="loading loading-spinner" />
+      ) : providers.length === 0 ? (
+        <Settings onSaved={refresh} />
+      ) : (
+        <>
+          <Chat providers={providers} />
+          <details className="collapse collapse-arrow bg-base-100">
+            <summary className="collapse-title">Add another provider key</summary>
+            <div className="collapse-content">
+              <Settings onSaved={refresh} />
+            </div>
+          </details>
+        </>
+      )}
     </main>
   );
 }
