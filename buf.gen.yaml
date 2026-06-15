@@ -2,11 +2,11 @@ version: v2
 inputs:
   - directory: proto
 plugins:
-  - remote: buf.build/bufbuild/es
+  - local: ./packages/api/node_modules/.bin/protoc-gen-es
     out: packages/api/src/gen
     opt:
       - target=ts
-  - remote: buf.build/connectrpc/query-es
+  - local: ./packages/api/node_modules/.bin/protoc-gen-connect-query
     out: packages/api/src/gen
     opt:
       - target=ts
