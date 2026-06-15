@@ -20,7 +20,7 @@ function Home() {
         <VersionBadge
           version={data?.version}
           loading={isLoading}
-          error={error ? "unreachable" : undefined}
+          error={error?.message}
         />
       </div>
     </main>

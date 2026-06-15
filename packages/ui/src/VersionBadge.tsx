@@ -5,7 +5,7 @@ export interface VersionBadgeProps {
 }
 
 export function VersionBadge({ version, loading = false, error }: VersionBadgeProps) {
-  if (error) return <span className="badge badge-error">{error}</span>;
-  if (loading || version === undefined) return <span className="badge">loading…</span>;
-  return <span className="badge badge-success">v{version}</span>;
+  if (error) return <span role="alert" className="badge badge-error">{error}</span>;
+  if (loading || version === undefined) return <span role="status" className="badge">loading…</span>;
+  return <span role="status" className="badge badge-success">v{version}</span>;
 }
