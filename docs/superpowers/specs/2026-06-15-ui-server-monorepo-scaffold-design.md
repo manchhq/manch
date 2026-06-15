@@ -20,7 +20,7 @@ remove the License section from the README.
 - Dual-license files (`LICENSE-MIT`, `LICENSE-APACHE`); remove README License section.
 - pnpm workspace + Turborepo coexisting with the existing Cargo workspace.
 - `proto/` as the single wire-contract source feeding both Rust and TS codegen.
-- `crates/manch-server` — `connectrpc` + `axum` server with a stub RPC.
+- `apps/server` — `connectrpc` + `axum` server with a stub RPC (crate `manch-server`).
 - `packages/api` — generated TS Connect client + Connect-Query hooks.
 - `packages/ui` — dumb/presentational React components (Tailwind + DaisyUI),
   tested with Vitest + React Testing Library, documented in Storybook.
@@ -47,17 +47,23 @@ manch/
 ├── proto/manch/v1/*.proto     # the wire contract (single source of truth)
 ├── LICENSE-MIT  LICENSE-APACHE
 │
-├── crates/
-│   ├── manch-protocol/        # (existing)
-│   └── manch-server/          # NEW: connectrpc + axum, embeds core (stub for now)
+├── crates/                    # reusable library substrate (embed these)
+│   └── manch-protocol/        # (existing)
 │
 ├── packages/
 │   ├── api/                   # generated TS Connect client + connect-query hooks
 │   └── ui/                    # dumb React components (Tailwind+DaisyUI, Vitest+RTL, Storybook)
 │
-└── apps/
+└── apps/                      # deployable applications / consumers (run these)
+    ├── server/                # NEW: connectrpc + axum, embeds core (stub for now); crate `manch-server`
     └── desktop/               # Tauri 2: Vite+React frontend + src-tauri/ (Rust)
 ```
+
+> **Placement rationale:** `crates/` holds reusable library substrate you *embed*
+> (`manch-protocol`, later `manch-core`/`manch-acp`/`manch-memory`). `apps/` holds
+> deployable *consumers* you *run* — the desktop app and the self-hostable server
+> alike. The server is a deployable product, not a library, so it lives in `apps/`
+> next to the desktop app (matching the README's consumer-vs-library taxonomy).
 
 ### Tooling decisions
 - **Turborepo** orchestrates JS/TS tasks; `turbo.json` defines `build`, `test`,
@@ -84,7 +90,7 @@ service ManchService {
 ```
 The streaming `Prompt` RPC is intentionally absent (deferred milestone).
 
-### `crates/manch-server`
+### `apps/server` (crate `manch-server`)
 - Deps: `connectrpc` (axum feature), `buffa`, `axum`, `tokio`, `manch-protocol`.
 - `build.rs` runs `connectrpc-build` over `../../proto`.
 - A stub `ManchService` impl returning the workspace version string.
@@ -145,7 +151,7 @@ The streaming `Prompt` RPC is intentionally absent (deferred milestone).
 1. **Licensing** — add `LICENSE-MIT` + `LICENSE-APACHE`; delete README License section.
 2. **Workspace scaffold** — pnpm root, `pnpm-workspace.yaml`, `turbo.json`, `proto/`, buf config, `.gitignore` updates.
 3. **`packages/ui`** — Tailwind + DaisyUI + Vitest + RTL + Storybook + sample component.
-4. **`packages/api` + `crates/manch-server`** — proto codegen both sides, stub RPC.
+4. **`packages/api` + `apps/server`** — proto codegen both sides, stub RPC.
 5. **`apps/desktop`** — Tauri shell wiring it all together.
 
 ## Open follow-ups (not this pass)
