@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/manch-protocol"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/manchhq/manch"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Foundation crates (already published under the manchhq org)
+katha = "0.1"
+kathputli = "0.1"
+
+# Official Agent Client Protocol SDK — Manch builds on this, it does not reinvent it.
+agent-client-protocol = "0.14"
+
+# Shared third-party deps
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+
+# Internal crates
+manch-protocol = { path = "crates/manch-protocol", version = "0.0.0" }

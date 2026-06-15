@@ -1,0 +1,15 @@
+[package]
+name = "manch-protocol"
+description = "The contracts for Manch: Agent, Tool, Channel, and MemoryStore traits, built on the Agent Client Protocol vocabulary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agent-client-protocol = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
