@@ -16,6 +16,7 @@ impl Db {
     }
 
     /// In-memory database, for tests.
+    #[cfg(test)]
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init(&conn)?;
