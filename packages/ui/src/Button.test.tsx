@@ -20,4 +20,13 @@ describe("Button", () => {
     render(<Button label="Primary" variant="primary" onClick={() => {}} />);
     expect(screen.getByRole("button", { name: "Primary" })).toHaveClass("btn-primary");
   });
+
+  it("does not call onClick when disabled", async () => {
+    const onClick = vi.fn();
+    render(<Button label="Save" onClick={onClick} disabled />);
+    const btn = screen.getByRole("button", { name: "Save" });
+    expect(btn).toBeDisabled();
+    await userEvent.click(btn);
+    expect(onClick).not.toHaveBeenCalled();
+  });
 });
