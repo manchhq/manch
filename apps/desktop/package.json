@@ -10,25 +10,26 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@manch/ui": "workspace:*",
-    "@manch/api": "workspace:*",
-    "@tanstack/react-router": "^1.87.0",
-    "@tanstack/react-query": "^5.62.0",
     "@connectrpc/connect-query": "^2.0.0",
+    "@manch/api": "workspace:*",
+    "@manch/ui": "workspace:*",
+    "@tanstack/react-query": "^5.62.0",
+    "@tanstack/react-router": "^1.87.0",
+    "@tauri-apps/api": "^2.11.0",
     "@uidotdev/usehooks": "^2.4.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.1.0",
-    "@tanstack/router-plugin": "^1.87.0",
-    "@vitejs/plugin-react": "^4.3.4",
     "@tailwindcss/vite": "^4.0.0",
-    "tailwindcss": "^4.0.0",
-    "daisyui": "^5.0.0",
+    "@tanstack/router-plugin": "^1.87.0",
+    "@tauri-apps/cli": "^2.1.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "vite": "^6.0.0",
-    "typescript": "^5.7.2"
+    "@vitejs/plugin-react": "^4.3.4",
+    "daisyui": "^5.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0"
   }
 }
