@@ -1,2 +1,19 @@
 /target
 Cargo.lock
+
+# JS / pnpm
+node_modules/
+dist/
+.turbo/
+
+# Generated protobuf code (regenerated from proto/)
+packages/api/src/gen/
+
+# Tauri build output
+apps/desktop/src-tauri/target/
+
+# Keep file-based router generated tree (committed on purpose)
+!apps/desktop/src/routeTree.gen.ts
+
+# Storybook build output
+storybook-static/

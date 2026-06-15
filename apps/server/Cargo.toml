@@ -1,0 +1,25 @@
+[package]
+name = "manch-server"
+description = "Optional, domain-free self-hostable Manch server exposing the core over ConnectRPC."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "manch-server"
+path = "src/main.rs"
+
+[dependencies]
+manch-protocol = { workspace = true }
+connectrpc = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+axum = { workspace = true }
+http-body = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+
+[build-dependencies]
+connectrpc-build = { workspace = true }

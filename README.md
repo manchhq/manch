@@ -256,9 +256,3 @@ Each name maps to its function. *Katha records, Kathputli performs, Manch presen
 
 If that works, every other consumer (the server, any domain product) is just a
 different set of registered `Tool`s on the same spine.
-
----
-
-## License
-
-Open source (MIT OR Apache-2.0). Low-support posture: contributions welcome, not promised.
