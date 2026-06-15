@@ -90,9 +90,6 @@ importers:
       '@connectrpc/connect-web':
         specifier: ^2.0.0
         version: 2.1.2(@bufbuild/protobuf@2.12.0)(@connectrpc/connect@2.1.2(@bufbuild/protobuf@2.12.0))
-      '@tanstack/react-query':
-        specifier: ^5.62.0
-        version: 5.101.0(react@19.2.7)
       remeda:
         specifier: ^2.17.0
         version: 2.39.0
@@ -109,6 +106,9 @@ importers:
       '@connectrpc/protoc-gen-connect-query':
         specifier: ^2.0.0
         version: 2.2.0(@bufbuild/protoc-gen-es@2.12.0(@bufbuild/protobuf@2.12.0))
+      '@tanstack/react-query':
+        specifier: ^5.62.0
+        version: 5.101.0(react@19.2.7)
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
