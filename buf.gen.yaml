@@ -1,0 +1,12 @@
+version: v2
+inputs:
+  - directory: proto
+plugins:
+  - remote: buf.build/bufbuild/es
+    out: packages/api/src/gen
+    opt:
+      - target=ts
+  - remote: buf.build/connectrpc/query-es
+    out: packages/api/src/gen
+    opt:
+      - target=ts

@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package manch.v1;
+
+// Scaffold service. The real streaming Prompt RPC is deferred to the
+// agent-wiring milestone; GetVersion exists to prove the end-to-end path.
+service ManchService {
+  rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
+}
+
+message GetVersionRequest {}
+
+message GetVersionResponse {
+  string version = 1;
+}
