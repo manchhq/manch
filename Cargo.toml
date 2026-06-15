@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/manch-protocol"]
+members = ["crates/manch-protocol", "crates/manch-server"]
 
 [workspace.package]
 version = "0.0.0"
@@ -22,7 +22,15 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "net", "macros"] }
+
+# ConnectRPC + Axum stack
+connectrpc = { version = "0.7", features = ["axum", "client"] }
+connectrpc-build = "0.7"
+buffa = { version = "0.7", features = ["json"] }
+buffa-types = { version = "0.7", features = ["json"] }
+axum = "0.8"
+http-body = "1"
 
 # Internal crates
 manch-protocol = { path = "crates/manch-protocol", version = "0.0.0" }
