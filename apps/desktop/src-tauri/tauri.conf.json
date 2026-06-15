@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Manch",
+  "version": "0.0.0",
+  "identifier": "hq.manch.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm --filter @manch/desktop dev",
+    "beforeBuildCommand": "pnpm --filter @manch/desktop build"
+  },
+  "app": {
+    "windows": [{ "title": "Manch", "width": 1000, "height": 700 }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png"] }
+}
