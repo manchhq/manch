@@ -143,10 +143,54 @@ impl ClaudeCodeAgent {
 
 #[async_trait]
 impl ChatAgent for ClaudeCodeAgent {
-    async fn ask(&self, _prompt: &str) -> Result<String, String> {
-        let _ = &self.api_key; // used in Task 3
-        let _ = claude_code_args; // referenced in Task 3
-        Err("claude-code path not wired yet".to_string())
+    async fn ask(&self, prompt: &str) -> Result<String, String> {
+        use agent_client_protocol::schema::{
+            InitializeRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+            RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
+        };
+        use agent_client_protocol::{self as acp, AcpAgent, Agent, Client, ConnectionTo};
+
+        // `from_args`: leading `NAME=value` tokens become subprocess env vars.
+        let agent = AcpAgent::from_args(claude_code_args(&self.api_key)).map_err(|e| e.to_string())?;
+        let prompt = prompt.to_string();
+
+        Client
+            .builder()
+            // Session text is collected by `read_to_string`; this observer is a no-op.
+            .on_receive_notification(
+                async move |_n: SessionNotification, _cx| Ok(()),
+                acp::on_receive_notification!(),
+            )
+            // One-shot: auto-approve the first permission option, no UI.
+            .on_receive_request(
+                async move |request: RequestPermissionRequest, responder, _connection| {
+                    match request.options.first().map(|opt| opt.option_id.clone()) {
+                        Some(id) => responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
+                        )),
+                        None => responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        )),
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
+                connection
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                connection
+                    .build_session_cwd()?
+                    .block_task()
+                    .run_until(async move |mut session| {
+                        session.send_prompt(&prompt)?;
+                        session.read_to_string().await
+                    })
+                    .await
+            })
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
