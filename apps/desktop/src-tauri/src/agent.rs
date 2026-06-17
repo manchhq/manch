@@ -144,7 +144,6 @@ impl ClaudeCodeAgent {
 #[async_trait]
 impl ChatAgent for ClaudeCodeAgent {
     async fn ask(&self, prompt: &str) -> Result<String, String> {
-        use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
 
         use agent_client_protocol::schema::{
@@ -175,6 +174,7 @@ impl ChatAgent for ClaudeCodeAgent {
                         ..
                     }) = n.update
                     {
+                        eprintln!("[acp] message chunk (+{} chars)", text.text.len());
                         sink.lock().unwrap().push_str(&text.text);
                     }
                     Ok(())
@@ -200,7 +200,10 @@ impl ChatAgent for ClaudeCodeAgent {
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+                // Isolate the agent from Manch's own working dir: hand Claude Code a
+                // dedicated, empty workspace so it does not read this project's files.
+                let cwd = std::env::temp_dir().join("manch-acp-workspace");
+                std::fs::create_dir_all(&cwd).ok();
                 let session = connection
                     .send_request(NewSessionRequest::new(cwd))
                     .block_task()
