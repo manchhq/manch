@@ -144,22 +144,41 @@ impl ClaudeCodeAgent {
 #[async_trait]
 impl ChatAgent for ClaudeCodeAgent {
     async fn ask(&self, prompt: &str) -> Result<String, String> {
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
         use agent_client_protocol::schema::{
-            InitializeRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+            ContentBlock, ContentChunk, InitializeRequest, NewSessionRequest, PromptRequest,
+            ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
             RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
+            SessionUpdate, TextContent,
         };
         use agent_client_protocol::{self as acp, AcpAgent, Agent, Client, ConnectionTo};
 
-        // `from_args`: leading `NAME=value` tokens become subprocess env vars.
+        // BYOC auth: `from_args` leading `NAME=value` tokens become subprocess env
+        // vars; with `None` no key is injected and Claude Code uses its own login.
         let agent = AcpAgent::from_args(claude_code_args(self.api_key.as_deref()))
             .map_err(|e| e.to_string())?;
         let prompt = prompt.to_string();
 
-        Client
+        // Assistant text streams in as `AgentMessageChunk` notifications; collect it
+        // in the notification handler (the pattern the crate's own example uses).
+        let buf = Arc::new(Mutex::new(String::new()));
+        let sink = buf.clone();
+
+        let stop = Client
             .builder()
-            // Session text is collected by `read_to_string`; this observer is a no-op.
             .on_receive_notification(
-                async move |_n: SessionNotification, _cx| Ok(()),
+                async move |n: SessionNotification, _cx| {
+                    if let SessionUpdate::AgentMessageChunk(ContentChunk {
+                        content: ContentBlock::Text(text),
+                        ..
+                    }) = n.update
+                    {
+                        sink.lock().unwrap().push_str(&text.text);
+                    }
+                    Ok(())
+                },
                 acp::on_receive_notification!(),
             )
             // One-shot: auto-approve the first permission option, no UI.
@@ -181,17 +200,28 @@ impl ChatAgent for ClaudeCodeAgent {
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
-                connection
-                    .build_session_cwd()?
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+                let session = connection
+                    .send_request(NewSessionRequest::new(cwd))
                     .block_task()
-                    .run_until(async move |mut session| {
-                        session.send_prompt(&prompt)?;
-                        session.read_to_string().await
-                    })
-                    .await
+                    .await?;
+                let response = connection
+                    .send_request(PromptRequest::new(
+                        session.session_id,
+                        vec![ContentBlock::Text(TextContent::new(prompt))],
+                    ))
+                    .block_task()
+                    .await?;
+                Ok(response.stop_reason)
             })
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        let text = buf.lock().unwrap().clone();
+        if text.trim().is_empty() {
+            return Err(format!("claude-code returned no text (stop reason: {stop:?})"));
+        }
+        Ok(text)
     }
 }
 
