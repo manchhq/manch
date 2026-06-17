@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Provider = "anthropic" | "gemini";
+export type Provider = "anthropic" | "claude-code";
 
 export const PROVIDERS: { id: Provider; label: string }[] = [
-  { id: "anthropic", label: "Anthropic (Claude)" },
-  { id: "gemini", label: "Google (Gemini)" },
+  { id: "anthropic", label: "Anthropic (Claude · BYOK)" },
+  { id: "claude-code", label: "Claude Code (ACP)" },
 ];
 
 /** Tauri maps camelCase JS args to snake_case Rust params (apiKey -> api_key). */

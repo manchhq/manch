@@ -116,7 +116,7 @@ The moment a domain noun appears inside a `manch-*` crate, it has stopped being 
 | Crate | Responsibility |
 |-------|----------------|
 | `manch-acp` | Reusable, framework-agnostic **ACP host**. Wraps an external ACP agent (Claude Code, Gemini CLI, Codex) as a Manch `Agent`. Built on the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) crate for wire types. |
-| `manch-channels` | Inbound/outbound surfaces behind the `Channel` trait: CLI, Telegram, webhook. |
+| `manch-channels` | Inbound/outbound surfaces behind the `Channel` trait: CLI, Telegram, webhook. Each channel is an **opt-in Cargo feature *and* a separately published crate**, so a consumer (e.g. a future domain product) can depend on just `manch-channel-telegram` and wire it in as-is — no fork, no all-or-nothing dependency. |
 | `manch-memory` | Default `MemoryStore` (SQLite, local-first). **Context assembly lives here** — the hard retrieval/summarisation/compaction problem is isolated behind one method so it can be iterated without touching anything else. |
 
 ### Consumers (not in this workspace)
@@ -153,7 +153,11 @@ Everything an external developer extends is a trait in `manch-protocol`.
 
 Manch follows [Zed's external-agents model](https://zed.dev/docs/ai/external-agents):
 a session runs against **either** a key you bring **or** an agent CLI already on
-your machine. Either way it's just a registered `Agent`.
+your machine. Either way it's just a registered `Agent` — **one interface, two
+implementations.** A BYOK provider and an external CLI agent both implement the
+same [`Agent`] trait and both stream back ACP's own event vocabulary, so the core
+and the UI never branch on which kind they're talking to. (Zed proves this works:
+its native agent and its external ACP agents share one connection abstraction.)
 
 1. **BYOK (bring your own key)** — a direct provider connection (Claude / GPT /
    Gemini / local Ollama). `manch-core` owns the `prompt → tool → re-prompt` loop
@@ -162,6 +166,40 @@ your machine. Either way it's just a registered `Agent`.
    Codex, …) launched as a subprocess and driven over **ACP** by `manch-acp`. The
    external agent owns its own auth, model selection, and tools; Manch is the ACP
    *client* and streams its events through. No recompile, no source access.
+
+### The BYOK completion layer: thin hand-rolled clients, not a framework
+
+Manch's BYOK path does **not** sit on a Rust LLM framework (e.g. `rig`). Every
+serious agent host we surveyed — Zed, ZeroClaw, and AionUi's `aionrs` engine —
+hand-rolls thin per-provider clients over `reqwest`, and Manch does the same. The
+reason is *control*: the provider features that matter (prompt-caching betas,
+OAuth / subscription auth, reasoning params, the Responses API, streaming quirks)
+land in a framework — if ever — long after they ship in the raw API, and auth
+schemes like Anthropic OAuth, Bedrock SigV4, or Vertex service accounts don't fit
+a one-size abstraction at all.
+
+The work is smaller than it looks, because providers cluster into a few **wire
+dialects**, not N bespoke integrations:
+
+| Wire dialect | Build cost | Covers |
+|--------------|-----------|--------|
+| Anthropic Messages | one client | Claude |
+| OpenAI Chat / Responses | one client | OpenAI |
+| OpenAI-compatible (same client, different `base_url` + key) | ~zero extra | xAI/Grok, Groq, Together, Fireworks, DeepSeek, vLLM, LiteLLM, Ollama's `/v1` |
+| Gemini `generateContent` | one client | Gemini |
+| Bedrock (official `aws-sdk`) | later | Claude/others on AWS |
+
+So ~three hand-rolled clients plus one OpenAI-compatible config layer cover the
+entire list. Per-provider quirks (max-tokens field name, base URL, schema
+sanitisation) are **data**, not branches.
+
+**Provider roadmap:** Anthropic → OpenAI → OpenAI-compatible (lights up
+xAI / Groq / Together / Fireworks / vLLM / LiteLLM at once) → Gemini, Ollama →
+Bedrock / Vertex on demand.
+
+> `rig` is not banned. If it ever saves real work for one provider it can be
+> dropped in as a single `impl` behind the same trait — never as the load-bearing
+> interface.
 
 How a CLI agent gets discovered (a superset of Zed — registry + config + detection):
 
@@ -251,8 +289,13 @@ Each name maps to its function. *Katha records, Kathputli performs, Manch presen
 **Status:** design + skeleton. Core APIs not yet stabilised.
 
 **First milestone (proves the whole thesis):**
-> Wire `manch-app` (or a CLI) to stream **a single turn through a real ACP agent**
-> (Claude Code) end to end — prompt in, streamed tokens out, one tool call dispatched.
+> One prompt — *"What is the capital of India?"* — answered correctly through
+> **both** agent paths behind the single [`Agent`] interface:
+> 1. **BYOK Anthropic**, via Manch's own hand-rolled Messages-API client (no `rig`).
+> 2. **Claude Code**, launched as a subprocess and driven over **ACP**.
+>
+> Same question, same interface, two implementations. No streaming, no tools yet —
+> just proof that the unified seam holds across a raw provider and an external CLI.
 
-If that works, every other consumer (the server, any domain product) is just a
-different set of registered `Tool`s on the same spine.
+If that works, every other consumer (the server, any domain product) and every
+other provider is just a different `Agent`/`Tool` registered on the same spine.

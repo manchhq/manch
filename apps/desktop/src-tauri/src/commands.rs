@@ -1,6 +1,8 @@
 //! Tauri commands the frontend invokes. Thin glue over `db` + `agent`.
 
-use crate::agent::{complete, Provider};
+use crate::agent::{
+    offerable_providers, AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider,
+};
 use crate::db::Db;
 use tauri::State;
 
@@ -14,7 +16,8 @@ pub fn save_api_key(state: State<Db>, provider: String, api_key: String) -> Resu
 
 #[tauri::command]
 pub fn list_configured_providers(state: State<Db>) -> Result<Vec<String>, String> {
-    state.list_providers().map_err(|e| e.to_string())
+    let saved = state.list_providers().map_err(|e| e.to_string())?;
+    Ok(offerable_providers(saved))
 }
 
 #[tauri::command]
@@ -25,10 +28,22 @@ pub async fn send_prompt(
 ) -> Result<String, String> {
     let prov =
         Provider::from_id(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
-    // Read the key and release the mutex guard BEFORE awaiting the network call.
-    let key = state
-        .get_key(&provider)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no API key saved for {provider}"))?;
-    complete(prov, &key, &text).await
+    // Resolve owned keys here; the mutex guard is released inside `get_key`,
+    // never held across the network/subprocess await below.
+    let agent: Box<dyn ChatAgent> = match prov {
+        Provider::Anthropic => {
+            let key = state
+                .get_key("anthropic")
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "no API key saved for anthropic".to_string())?;
+            Box::new(AnthropicAgent::new(key))
+        }
+        Provider::ClaudeCode => {
+            // BYOC: Claude Code authenticates itself (its own login). A key saved
+            // explicitly under "claude-code" is an optional BYOK override; none is normal.
+            let key = state.get_key("claude-code").map_err(|e| e.to_string())?;
+            Box::new(ClaudeCodeAgent::new(key))
+        }
+    };
+    agent.ask(&text).await
 }
