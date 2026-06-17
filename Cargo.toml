@@ -33,4 +33,4 @@ axum = "0.8"
 http-body = "1"
 
 # Internal crates
-manch-protocol = { path = "crates/manch-protocol", version = "0.0.0" }
+manch-protocol = { path = "crates/manch-protocol", version = "0.0.1" }

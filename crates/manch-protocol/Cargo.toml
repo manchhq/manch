@@ -1,7 +1,7 @@
 [package]
 name = "manch-protocol"
 description = "The contracts for Manch: Agent, Tool, Channel, and MemoryStore traits, built on the Agent Client Protocol vocabulary."
-version.workspace = true
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
