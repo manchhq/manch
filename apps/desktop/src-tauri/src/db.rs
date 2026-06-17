@@ -73,7 +73,10 @@ mod tests {
     fn save_then_get_roundtrips() {
         let db = Db::open_in_memory().unwrap();
         db.save_key("anthropic", "sk-ant-123").unwrap();
-        assert_eq!(db.get_key("anthropic").unwrap().as_deref(), Some("sk-ant-123"));
+        assert_eq!(
+            db.get_key("anthropic").unwrap().as_deref(),
+            Some("sk-ant-123")
+        );
     }
 
     #[test]
