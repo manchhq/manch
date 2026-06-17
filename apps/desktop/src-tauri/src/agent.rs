@@ -96,6 +96,26 @@ pub fn offerable_providers(mut saved: Vec<String>) -> Vec<String> {
     saved
 }
 
+/// Merge one streamed `AgentMessageChunk` into the accumulator. ACP adapters vary:
+/// some send pure deltas, some send cumulative snapshots, and the Claude Code
+/// adapter repeats the full message at the end — naive concatenation doubles the
+/// reply ("New Delhi.New Delhi."). This tolerates all three. Pure.
+fn merge_chunk(buf: &mut String, chunk: &str) {
+    if chunk.is_empty() {
+        // nothing to add
+    } else if buf.is_empty() {
+        buf.push_str(chunk);
+    } else if chunk.starts_with(buf.as_str()) {
+        // cumulative snapshot that supersedes what we have
+        *buf = chunk.to_string();
+    } else if buf.ends_with(chunk) {
+        // exact repeat / trailing duplicate already present — drop it
+    } else {
+        // genuine delta
+        buf.push_str(chunk);
+    }
+}
+
 /// BYOK Anthropic via a hand-rolled Messages-API call.
 pub struct AnthropicAgent {
     api_key: String,
@@ -174,8 +194,8 @@ impl ChatAgent for ClaudeCodeAgent {
                         ..
                     }) = n.update
                     {
-                        eprintln!("[acp] message chunk (+{} chars)", text.text.len());
-                        sink.lock().unwrap().push_str(&text.text);
+                        eprintln!("[acp] message chunk: {:?}", text.text);
+                        merge_chunk(&mut sink.lock().unwrap(), &text.text);
                     }
                     Ok(())
                 },
@@ -221,6 +241,7 @@ impl ChatAgent for ClaudeCodeAgent {
             .map_err(|e| e.to_string())?;
 
         let text = buf.lock().unwrap().clone();
+        eprintln!("[acp] final reply ({} chars)", text.len());
         if text.trim().is_empty() {
             return Err(format!("claude-code returned no text (stop reason: {stop:?})"));
         }
@@ -287,6 +308,39 @@ mod tests {
         assert_eq!(args[0], "ANTHROPIC_API_KEY=sk-test");
         assert!(args.iter().any(|a| a == "npx"));
         assert!(args.iter().any(|a| a.contains("claude-agent-acp")));
+    }
+
+    #[test]
+    fn merge_chunk_dedups_exact_repeat() {
+        let mut b = String::new();
+        merge_chunk(&mut b, "New Delhi.");
+        merge_chunk(&mut b, "New Delhi.");
+        assert_eq!(b, "New Delhi.");
+    }
+
+    #[test]
+    fn merge_chunk_appends_distinct_deltas() {
+        let mut b = String::new();
+        merge_chunk(&mut b, "New");
+        merge_chunk(&mut b, " Delhi.");
+        assert_eq!(b, "New Delhi.");
+    }
+
+    #[test]
+    fn merge_chunk_replaces_cumulative_snapshot() {
+        let mut b = String::new();
+        merge_chunk(&mut b, "New");
+        merge_chunk(&mut b, "New Delhi.");
+        assert_eq!(b, "New Delhi.");
+    }
+
+    #[test]
+    fn merge_chunk_drops_final_full_repeat_after_deltas() {
+        let mut b = String::new();
+        merge_chunk(&mut b, "New");
+        merge_chunk(&mut b, " Delhi.");
+        merge_chunk(&mut b, "New Delhi."); // adapter's final full-message repeat
+        assert_eq!(b, "New Delhi.");
     }
 
     #[test]
