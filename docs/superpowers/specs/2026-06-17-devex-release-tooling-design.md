@@ -38,7 +38,7 @@ Current state: version is `0.0.0` everywhere via `version.workspace = true`; no
 | Versioning | **release-plz** — independent versioning for `manch-protocol` |
 | Property tests | **proptest now** on `manch-protocol` |
 | Pipeline scope | **Full**, including crates.io publish; first target `0.0.1` |
-| Server delivery | **Docker image only** — no native binaries, no win/mac targets |
+| Server delivery | **Docker image only** (GHCR now, Docker Hub later) — no native binaries, no win/mac targets |
 
 ## 1. Git hooks — Lefthook
 
@@ -104,14 +104,14 @@ The current `version.workspace = true = "0.0.0"` couples everything. Split:
 ### `release.yml` — on `v*` tag
 - **Desktop:** `tauri-action` build matrix — macOS, Windows, Ubuntu — producing
   installers attached to a GitHub Release.
-- **Server:** build a **Docker image** from a new multi-stage `Dockerfile`
-  (`cargo build --release -p manch-server` → slim Debian/distroless runtime).
-  - Default registry: **GHCR** (`ghcr.io`), which pushes with the built-in
-    `GITHUB_TOKEN`.
-  - The **push step is gated** on the registry credential being available; until
-    the user adds their key, the job builds the image (validating the Dockerfile)
-    and skips the push. Registry is configurable if the user prefers Docker Hub
-    (would add a `DOCKERHUB_TOKEN`).
+- **Server:** build and push a **Docker image** from a new multi-stage
+  `Dockerfile` (`cargo build --release -p manch-server` → slim Debian/distroless
+  runtime).
+  - Registry: **GHCR** (`ghcr.io/manchhq/manch-server`). Push is **enabled now** —
+    it authenticates with the built-in `GITHUB_TOKEN` (`packages: write`
+    permission), so no extra secret is required.
+  - **Docker Hub is a future addition** — when added it becomes a second push
+    target gated on a `DOCKERHUB_TOKEN` secret. Not wired in this pass.
   - **No native server binaries**, no Windows/macOS server targets.
   - The Dockerfile is structured to allow adding a front-end build stage later;
     wiring the server to serve static assets is app code and out of scope here.
@@ -120,7 +120,7 @@ The current `version.workspace = true = "0.0.0"` couples everything. Split:
 
 Set `manch-protocol` to `0.0.1` and let the crate track publish it to crates.io,
 validating release-plz + the token end-to-end. App-track installers and the
-server image follow on the first `v*` tag.
+server image (pushed to GHCR) follow on the first `v*` tag.
 
 ## Out of scope (YAGNI)
 
