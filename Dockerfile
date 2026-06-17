@@ -3,9 +3,13 @@
 # ── Build stage ───────────────────────────────────────
 FROM rust:1.85-bookworm AS builder
 WORKDIR /build
-# Copy the whole workspace: manch-server's build.rs reads ../../proto and the
-# build needs the workspace Cargo.toml + Cargo.lock; --locked enforces the pinned versions.
-# No protoc required — the connectrpc/buffa codegen is pure Rust.
+# manch-server's build.rs runs connectrpc-build, which spawns `protoc` to compile
+# proto/manch/v1/manch.proto — so protoc must be installed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+# Copy the whole workspace: build.rs reads ../../proto and the build needs the
+# workspace Cargo.toml + Cargo.lock; --locked enforces the pinned versions.
 COPY . .
 RUN cargo build --locked --release -p manch-server
 
