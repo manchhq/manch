@@ -4,10 +4,10 @@
 FROM rust:1.85-bookworm AS builder
 WORKDIR /build
 # Copy the whole workspace: manch-server's build.rs reads ../../proto and the
-# build needs the workspace Cargo.toml/Cargo.lock. No protoc required — the
-# connectrpc/buffa codegen is pure Rust.
+# build needs the workspace Cargo.toml + Cargo.lock; --locked enforces the pinned versions.
+# No protoc required — the connectrpc/buffa codegen is pure Rust.
 COPY . .
-RUN cargo build --release -p manch-server
+RUN cargo build --locked --release -p manch-server
 
 # ── Runtime stage ─────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
