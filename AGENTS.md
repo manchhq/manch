@@ -79,6 +79,36 @@ Manch **speaks ACP's vocabulary; it does not reinvent it.** Content blocks, tool
 - `manch-server` and `manch-desktop` are products (`publish = false`); they ship on a `v*` git tag — desktop installers via `tauri-action`, server as a Docker image on GHCR (`ghcr.io/manchhq/manch-server`).
 - Let `release-plz` manage version bumps; don't bump crate versions by hand.
 
+## Optional: AI code-navigation tools
+
+These are **optional** — the project builds, tests, and ships entirely without them. They help AI agents (and humans) navigate the codebase structurally instead of grepping. `just`/CI remain the source of truth for correctness.
+
+### Serena (configured here)
+
+[Serena](https://github.com/oraios/serena) gives symbol-level navigation (find a symbol, its references, callers) and project memories, without reading whole files. This repo is already set up for it:
+
+- `.serena/project.yml` — project config (languages: **rust**, **typescript**) and `.serena/memories/` — onboarding notes. Both are committed.
+- `.mcp.json` — declares the Serena MCP server, so any MCP-aware tool (Claude Code, etc.) opening this repo can start it.
+
+To use it you need:
+
+- **[uv](https://docs.astral.sh/uv/)** (provides `uvx`, which launches Serena) — `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- For Rust symbol navigation, **rust-analyzer** — `rustup component add rust-analyzer`.
+
+In Claude Code, opening the repo will prompt to approve the `serena` server from `.mcp.json`. Other clients: point them at the command in `.mcp.json` (`uvx --from git+https://github.com/oraios/serena serena start-mcp-server --context ide-assistant --project .`).
+
+### code-review-graph (configured here)
+
+[code-review-graph](https://code-review-graph.com) maintains a persistent, incremental knowledge graph of the codebase for token-efficient, context-aware reviews — change/impact analysis, semantic symbol search, and test-coverage queries. It's declared in `.mcp.json` (started as `code-review-graph serve`).
+
+To use it:
+
+- Install the CLI: `pip install code-review-graph` (or `pipx install code-review-graph`).
+- Build the graph once for this repo: `code-review-graph build`. Keep it current with `code-review-graph update` (incremental) or `code-review-graph watch`; inspect it with `code-review-graph status`.
+- The graph is stored **outside the repo** (`~/.code-review-graph/`), so there's nothing to commit or gitignore.
+
+Your MCP client then starts the `code-review-graph` server from `.mcp.json` and can use its graph tools (change detection, impact radius, semantic node search, …).
+
 ## When you're done with a change
 
 1. `just ci` is green.
