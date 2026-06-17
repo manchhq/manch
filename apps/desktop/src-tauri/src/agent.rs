@@ -70,26 +70,25 @@ fn parse_anthropic_text(body: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-/// Spawn args for the Claude Code ACP adapter. Leading `NAME=value` tokens are
-/// env vars; then the launch command. Pure.
-fn claude_code_args(api_key: &str) -> Vec<String> {
-    vec![
-        format!("ANTHROPIC_API_KEY={api_key}"),
-        "npx".into(),
-        "-y".into(),
-        CLAUDE_CODE_PKG.into(),
-    ]
+/// Spawn args for the Claude Code ACP adapter. A leading `NAME=value` token
+/// (only when a key is supplied) becomes a subprocess env var; then the launch
+/// command. BYOC: Claude Code authenticates itself, so the key is an optional
+/// override — `None` means "use Claude Code's own login". Pure.
+fn claude_code_args(api_key: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(key) = api_key {
+        args.push(format!("ANTHROPIC_API_KEY={key}"));
+    }
+    args.push("npx".into());
+    args.push("-y".into());
+    args.push(CLAUDE_CODE_PKG.into());
+    args
 }
 
-/// Key for the claude-code path: its own saved key, else the anthropic key. Pure.
-pub fn claude_code_key(own: Option<String>, anthropic: Option<String>) -> Option<String> {
-    own.or(anthropic)
-}
-
-/// Providers offerable in the UI: every saved one, plus `claude-code` whenever
-/// `anthropic` is present (it reuses the anthropic key). Pure.
+/// Providers offerable in the UI: every saved (BYOK) one, plus `claude-code`,
+/// which is always available because it brings its own auth (BYOC). Pure.
 pub fn offerable_providers(mut saved: Vec<String>) -> Vec<String> {
-    if saved.iter().any(|p| p == "anthropic") && !saved.iter().any(|p| p == "claude-code") {
+    if !saved.iter().any(|p| p == "claude-code") {
         saved.push("claude-code".into());
     }
     saved.sort();
@@ -132,11 +131,12 @@ impl ChatAgent for AnthropicAgent {
 
 /// BYOC Claude Code over ACP. Stub until Task 3 wires the subprocess.
 pub struct ClaudeCodeAgent {
-    api_key: String,
+    /// Optional BYOK override; `None` means Claude Code uses its own login (BYOC).
+    api_key: Option<String>,
 }
 
 impl ClaudeCodeAgent {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: Option<String>) -> Self {
         Self { api_key }
     }
 }
@@ -151,7 +151,8 @@ impl ChatAgent for ClaudeCodeAgent {
         use agent_client_protocol::{self as acp, AcpAgent, Agent, Client, ConnectionTo};
 
         // `from_args`: leading `NAME=value` tokens become subprocess env vars.
-        let agent = AcpAgent::from_args(claude_code_args(&self.api_key)).map_err(|e| e.to_string())?;
+        let agent = AcpAgent::from_args(claude_code_args(self.api_key.as_deref()))
+            .map_err(|e| e.to_string())?;
         let prompt = prompt.to_string();
 
         Client
@@ -240,30 +241,28 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_args_include_key_and_npx() {
-        let args = claude_code_args("sk-test");
+    fn claude_code_args_without_key_is_just_npx() {
+        let args = claude_code_args(None);
+        assert_eq!(args[0], "npx");
+        assert!(args.iter().any(|a| a.contains("claude-agent-acp")));
+        assert!(!args.iter().any(|a| a.starts_with("ANTHROPIC_API_KEY=")));
+    }
+
+    #[test]
+    fn claude_code_args_with_key_prepends_env() {
+        let args = claude_code_args(Some("sk-test"));
         assert_eq!(args[0], "ANTHROPIC_API_KEY=sk-test");
         assert!(args.iter().any(|a| a == "npx"));
         assert!(args.iter().any(|a| a.contains("claude-agent-acp")));
     }
 
     #[test]
-    fn claude_code_key_prefers_own_then_anthropic() {
-        assert_eq!(
-            claude_code_key(Some("own".into()), Some("ant".into())),
-            Some("own".into())
-        );
-        assert_eq!(claude_code_key(None, Some("ant".into())), Some("ant".into()));
-        assert_eq!(claude_code_key(None, None), None);
-    }
-
-    #[test]
-    fn offers_claude_code_when_anthropic_present() {
+    fn claude_code_always_offered_byoc_brings_own_auth() {
+        assert_eq!(offerable_providers(vec![]), vec!["claude-code".to_string()]);
         assert_eq!(
             offerable_providers(vec!["anthropic".into()]),
             vec!["anthropic".to_string(), "claude-code".to_string()]
         );
-        assert_eq!(offerable_providers(vec![]), Vec::<String>::new());
         assert_eq!(
             offerable_providers(vec!["claude-code".into()]),
             vec!["claude-code".to_string()]

@@ -50,7 +50,7 @@ across a raw provider and an external CLI.
 | id | impl | key source |
 |----|------|-----------|
 | `anthropic` | `AnthropicAgent` (hand-rolled Messages API) | saved `anthropic` key |
-| `claude-code` | `ClaudeCodeAgent` (ACP subprocess) | saved `claude-code` key, else falls back to the `anthropic` key |
+| `claude-code` | `ClaudeCodeAgent` (ACP subprocess) | **none — BYOC: uses Claude Code's own login.** An explicit `claude-code` key is an optional override; the `anthropic` BYOK key is **never** borrowed. |
 
 Gemini is **dropped** from this slice (it was rig-backed). It returns later via
 the README's provider roadmap (Gemini-native / OpenAI-compatible work).
@@ -71,8 +71,10 @@ Model id `claude-opus-4-8` is authoritative per the `claude-api` skill — do no
 - Adapter: `@agentclientprotocol/claude-agent-acp` (canonical; the old
   `@zed-industries/claude-code-acp` is deprecated), launched via
   `npx -y @agentclientprotocol/claude-agent-acp@latest`.
-- Auth: pass the resolved key as `ANTHROPIC_API_KEY` in the subprocess env. No
-  ACP `authenticate` call needed.
+- Auth: **BYOC — the adapter uses its own login** (Claude Code OAuth / Max
+  subscription). Manch does not require a key. If a `claude-code` key is explicitly
+  saved, it is passed as `ANTHROPIC_API_KEY` to the subprocess as an override.
+  No ACP `authenticate` call needed.
 - Crate: `agent-client-protocol = { version = "=0.14.0", features = ["unstable"] }`
   (match Zed's pin).
 - Flow (client/host side): `initialize(V1)` → new session → `session/prompt` →
@@ -94,9 +96,9 @@ UI, key encryption at rest, Gemini/other providers, `manch-core` extraction.
 
 1. Save an Anthropic key, ask "What is the capital of India?", select
    **Anthropic** → assistant answers **New Delhi**.
-2. With Claude Code installed (`npx` available) and a key saved, select
-   **Claude Code** → assistant answers **New Delhi** (routed through the ACP
-   subprocess).
+2. With Claude Code available (`npx` on PATH, logged in) and **no key required**,
+   select **Claude Code** → assistant answers **New Delhi** (routed through the ACP
+   subprocess, authenticated by Claude Code's own login).
 3. Bad key on either path → a red error bubble, not a crash.
 4. `cargo test -p manch-desktop` passes (pure unit tests for request building +
    response parsing + provider/arg helpers).

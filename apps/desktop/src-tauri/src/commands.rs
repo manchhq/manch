@@ -1,7 +1,7 @@
 //! Tauri commands the frontend invokes. Thin glue over `db` + `agent`.
 
 use crate::agent::{
-    claude_code_key, offerable_providers, AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider,
+    offerable_providers, AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider,
 };
 use crate::db::Db;
 use tauri::State;
@@ -39,10 +39,9 @@ pub async fn send_prompt(
             Box::new(AnthropicAgent::new(key))
         }
         Provider::ClaudeCode => {
-            let own = state.get_key("claude-code").map_err(|e| e.to_string())?;
-            let ant = state.get_key("anthropic").map_err(|e| e.to_string())?;
-            let key = claude_code_key(own, ant)
-                .ok_or_else(|| "no API key saved for claude-code (or anthropic)".to_string())?;
+            // BYOC: Claude Code authenticates itself (its own login). A key saved
+            // explicitly under "claude-code" is an optional BYOK override; none is normal.
+            let key = state.get_key("claude-code").map_err(|e| e.to_string())?;
             Box::new(ClaudeCodeAgent::new(key))
         }
     };
