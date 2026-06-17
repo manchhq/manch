@@ -1,0 +1,15 @@
+# Only the library crate is published to crates.io. The desktop app and server
+# are products, released on a `v*` git tag (see .github/workflows/release.yml).
+
+[[package]]
+name = "manch-protocol"
+publish = true
+release = true
+
+[[package]]
+name = "manch-server"
+release = false
+
+[[package]]
+name = "manch-desktop"
+release = false
