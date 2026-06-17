@@ -298,6 +298,11 @@ Git hooks (via Lefthook) run `fmt` + `lint` on commit and `clippy` + tests on pu
 Tagging `vX.Y.Z` builds desktop installers and the server Docker image
 (`ghcr.io/manchhq/manch-server`).
 
+**Using an AI coding agent?** See [`AGENTS.md`](AGENTS.md) — the tool-agnostic guide
+(commands, repo map, conventions). Claude Code, Gemini CLI, and Copilot read their
+own pointer files (`CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`), all
+of which defer to `AGENTS.md`.
+
 ---
 
 ## Status & first milestone
