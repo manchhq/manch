@@ -1,0 +1,18 @@
+# Hooks delegate to `just` recipes so logic lives in one place (see justfile).
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      run: just fmt-check
+    lint:
+      run: just lint
+
+pre-push:
+  parallel: true
+  commands:
+    clippy:
+      run: just clippy
+    test:
+      run: just test
+    build-js:
+      run: just build-js

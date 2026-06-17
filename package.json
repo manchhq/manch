@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
+    "prepare": "lefthook install",
     "build": "turbo run build",
     "test": "turbo run test",
     "lint": "turbo run lint",
@@ -11,8 +12,9 @@
     "desktop:dev": "pnpm --filter @manch/desktop tauri dev"
   },
   "devDependencies": {
-    "turbo": "^2.3.0",
     "@bufbuild/buf": "^1.47.2",
+    "lefthook": "^2.1.9",
+    "turbo": "^2.3.0",
     "typescript": "^5.7.2"
   }
 }

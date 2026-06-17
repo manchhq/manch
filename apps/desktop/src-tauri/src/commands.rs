@@ -1,8 +1,6 @@
 //! Tauri commands the frontend invokes. Thin glue over `db` + `agent`.
 
-use crate::agent::{
-    offerable_providers, AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider,
-};
+use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
 use tauri::State;
 
@@ -11,7 +9,9 @@ pub fn save_api_key(state: State<Db>, provider: String, api_key: String) -> Resu
     if Provider::from_id(&provider).is_none() {
         return Err(format!("unknown provider: {provider}"));
     }
-    state.save_key(&provider, &api_key).map_err(|e| e.to_string())
+    state
+        .save_key(&provider, &api_key)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

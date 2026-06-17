@@ -203,15 +203,17 @@ impl ChatAgent for ClaudeCodeAgent {
             )
             // One-shot: auto-approve the first permission option, no UI.
             .on_receive_request(
-                async move |request: RequestPermissionRequest, responder, _connection| {
-                    match request.options.first().map(|opt| opt.option_id.clone()) {
-                        Some(id) => responder.respond(RequestPermissionResponse::new(
-                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-                        )),
-                        None => responder.respond(RequestPermissionResponse::new(
-                            RequestPermissionOutcome::Cancelled,
-                        )),
-                    }
+                async move |request: RequestPermissionRequest, responder, _connection| match request
+                    .options
+                    .first()
+                    .map(|opt| opt.option_id.clone())
+                {
+                    Some(id) => responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
+                    )),
+                    None => responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    )),
                 },
                 acp::on_receive_request!(),
             )
@@ -243,7 +245,9 @@ impl ChatAgent for ClaudeCodeAgent {
         let text = buf.lock().unwrap().clone();
         eprintln!("[acp] final reply ({} chars)", text.len());
         if text.trim().is_empty() {
-            return Err(format!("claude-code returned no text (stop reason: {stop:?})"));
+            return Err(format!(
+                "claude-code returned no text (stop reason: {stop:?})"
+            ));
         }
         Ok(text)
     }

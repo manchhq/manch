@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{routing::get, Router as AxumRouter};
+use axum::{Router as AxumRouter, routing::get};
 use connectrpc::Router as ConnectRouter;
 use manch_server::{ManchServiceImpl, proto::manch::v1::ManchServiceExt as _};
 

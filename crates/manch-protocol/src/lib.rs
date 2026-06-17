@@ -35,6 +35,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// Re-exported Agent Client Protocol vocabulary. Manch speaks ACP's types; it
 /// does not define parallel content/event enums.
@@ -70,7 +71,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Assembling this — retrieval, summarisation, compaction — is the hard problem,
 /// and it lives behind [`MemoryStore::assemble_context`] so it can be iterated
 /// without touching the runtime or any agent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Context {
     pub session_id: String,
     /// The conversation as ACP content blocks, oldest first.
@@ -99,7 +100,7 @@ pub trait EventSink: Send + Sync {
 
 /// Describes a host-registered [`Tool`] to the model (BYOK path). Mirrors the
 /// shape an LLM tool-use API expects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,

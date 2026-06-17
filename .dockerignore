@@ -1,0 +1,9 @@
+target/
+node_modules/
+dist/
+.turbo/
+.git/
+apps/desktop/src-tauri/target/
+packages/api/src/gen/
+storybook-static/
+**/*.md

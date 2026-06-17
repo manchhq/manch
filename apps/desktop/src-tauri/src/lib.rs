@@ -9,10 +9,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let dir = app
-                .path()
-                .app_data_dir()
-                .expect("resolve app data dir");
+            let dir = app.path().app_data_dir().expect("resolve app data dir");
             std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("manch.sqlite3");
             let db = Db::open(db_path.to_str().expect("utf-8 db path")).expect("open database");

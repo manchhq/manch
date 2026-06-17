@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 
 # JS / pnpm
 node_modules/

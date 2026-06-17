@@ -1,6 +1,4 @@
-use crate::proto::manch::v1::{
-    GetVersionRequest, GetVersionResponse, ManchService,
-};
+use crate::proto::manch::v1::{GetVersionRequest, GetVersionResponse, ManchService};
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult};
 
 /// Stub implementation of [`ManchService`].
@@ -48,9 +46,8 @@ mod tests {
         // (via `pub use self::__buffa::view::GetVersionRequestView` in the generated
         // mod.rs), so we use that stable public path instead of the internal
         // `__buffa::view::` sub-module.
-        let view =
-            crate::proto::manch::v1::GetVersionRequestView::decode_view(&body)
-                .expect("empty buffer is a valid GetVersionRequest");
+        let view = crate::proto::manch::v1::GetVersionRequestView::decode_view(&body)
+            .expect("empty buffer is a valid GetVersionRequest");
         // ServiceRequest::from_parts is #[doc(hidden)] (generated dispatch glue uses
         // it internally); no public From/new constructor exists on ServiceRequest in
         // connectrpc 0.7.0. The only alternative would be an encode→decode round-trip
@@ -75,8 +72,8 @@ mod tests {
             .expect("encoding must not fail")
             .to_vec();
 
-        let decoded = GetVersionResponse::decode(&mut encoded.as_slice())
-            .expect("decoding must not fail");
+        let decoded =
+            GetVersionResponse::decode(&mut encoded.as_slice()).expect("decoding must not fail");
 
         assert_eq!(
             decoded.version,

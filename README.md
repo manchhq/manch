@@ -284,6 +284,22 @@ Each name maps to its function. *Katha records, Kathputli performs, Manch presen
 
 ---
 
+## Development
+
+```bash
+just setup     # install JS deps, generate proto bindings, install git hooks
+just ci        # run everything CI runs: fmt, clippy, tests, JS lint/test/build
+just test      # all tests (Rust + JS)
+just --list    # see all recipes
+```
+
+Git hooks (via Lefthook) run `fmt` + `lint` on commit and `clippy` + tests on push.
+`manch-protocol` is published to crates.io by release-plz on merge to `main`.
+Tagging `vX.Y.Z` builds desktop installers and the server Docker image
+(`ghcr.io/manchhq/manch-server`).
+
+---
+
 ## Status & first milestone
 
 **Status:** design + skeleton. Core APIs not yet stabilised.
