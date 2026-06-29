@@ -10,8 +10,8 @@ export function Message({ message }: { message: MessageData }) {
       data-role={message.role}
       className={`chat ${isUser ? "chat-end" : "chat-start"}`}
     >
-      <div className={`chat-bubble ${isUser ? "chat-bubble-secondary" : "bg-base-100 text-base-content"}`}>
-        <div className="prose prose-sm prose-invert max-w-none">
+      <div className={`chat-bubble ${isUser ? "chat-bubble-secondary" : ""}`}>
+        <div className="prose prose-sm max-w-none">
           <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
         </div>
       </div>
