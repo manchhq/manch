@@ -1,0 +1,37 @@
+/* Manch stage theme: house lights down, kathputli warmth. */
+@plugin "daisyui/theme" {
+  name: "manch-stage";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+
+  /* Stage canvas — deep aubergine/indigo black */
+  --color-base-100: oklch(20% 0.03 305);
+  --color-base-200: oklch(16% 0.03 305);
+  --color-base-300: oklch(12% 0.025 305);
+  --color-base-content: oklch(92% 0.02 80);
+
+  /* Marigold/amber — the spotlight */
+  --color-primary: oklch(80% 0.16 75);
+  --color-primary-content: oklch(20% 0.05 75);
+
+  /* Indigo — the night */
+  --color-secondary: oklch(55% 0.14 280);
+  --color-secondary-content: oklch(96% 0.02 280);
+
+  /* Terracotta — the craft accent / error-leaning warmth */
+  --color-accent: oklch(64% 0.16 40);
+  --color-accent-content: oklch(98% 0.01 40);
+
+  --color-neutral: oklch(26% 0.03 305);
+  --color-neutral-content: oklch(90% 0.02 80);
+
+  --color-info: oklch(70% 0.12 230);
+  --color-success: oklch(78% 0.15 140);
+  --color-warning: oklch(82% 0.16 85);
+  --color-error: oklch(62% 0.2 28);
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+}
