@@ -30,3 +30,5 @@ export const activeConversationAtom = atom((get) => {
   const id = get(activeIdAtom);
   return get(conversationsAtom).find((c) => c.id === id) ?? null;
 });
+
+export const settingsOpenAtom = atom<boolean>(false);
