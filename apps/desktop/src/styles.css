@@ -1,2 +1,4 @@
 @import "tailwindcss";
+@source "../../../packages/ui/src";
 @plugin "daisyui";
+@import "../../../packages/ui/src/theme/manch-stage.css";
