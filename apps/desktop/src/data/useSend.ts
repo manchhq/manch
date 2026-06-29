@@ -9,7 +9,7 @@ import {
 } from "../store/atoms";
 
 export function useSend(engine: StageEngine) {
-  const [conversations, setConversations] = useAtom(conversationsAtom);
+  const setConversations = useSetAtom(conversationsAtom);
   const [activeId] = useAtom(activeIdAtom);
   const [isStreaming, setIsStreaming] = useAtom(isStreamingAtom);
   const setStreamingText = useSetAtom(streamingTextAtom);
@@ -40,6 +40,8 @@ export function useSend(engine: StageEngine) {
           setConversations((cs) => cs.map((c) => c.id === activeId ? { ...c, toolCalls: live.toolCalls } : c));
           setStatus("done");
         }
+      } catch {
+        setStatus("error");
       } finally {
         setIsStreaming(false);
         setStreamingText("");

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useAtom, useAtomValue } from "jotai";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { Panel, IconRail } from "@manch/ui";
 import GreenRoom from "../containers/GreenRoom";
 import Stage from "../containers/Stage";
@@ -7,6 +7,7 @@ import Performance from "../containers/Performance";
 import Settings from "../containers/Settings";
 import {
   leftCollapsedAtom, rightCollapsedAtom, settingsOpenAtom, conversationsAtom,
+  activeIdAtom, newConversation,
 } from "../store/atoms";
 
 export const Route = createFileRoute("/")({ component: Home });
@@ -16,17 +17,29 @@ export function Home() {
   const [rightCollapsed, setRight] = useAtom(rightCollapsedAtom);
   const [settingsOpen, setSettingsOpen] = useAtom(settingsOpenAtom);
   const conversations = useAtomValue(conversationsAtom);
+  const setConversations = useSetAtom(conversationsAtom);
+  const setActiveId = useSetAtom(activeIdAtom);
+
+  const startConversation = () => {
+    const c = newConversation();
+    setConversations((cs) => [c, ...cs]);
+    setActiveId(c.id);
+    setSettingsOpen(false);
+  };
 
   if (settingsOpen || conversations.length === 0) {
     return (
       <div className="flex h-full flex-col">
         <header className="flex items-center justify-between border-b border-base-300 px-4 py-2">
           <h1 className="text-lg font-semibold">Manch</h1>
-          {conversations.length > 0 && (
-            <button className="btn btn-ghost btn-sm" onClick={() => setSettingsOpen(false)}>Back to stage</button>
-          )}
+          <div className="flex gap-2">
+            <button className="btn btn-primary btn-sm" onClick={startConversation}>New conversation</button>
+            {conversations.length > 0 && (
+              <button className="btn btn-ghost btn-sm" onClick={() => setSettingsOpen(false)}>Back to stage</button>
+            )}
+          </div>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto"><Settings /></div>
+        <main className="min-h-0 flex-1 overflow-y-auto"><Settings /></main>
       </div>
     );
   }
