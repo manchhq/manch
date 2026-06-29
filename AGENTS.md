@@ -13,7 +13,7 @@ A polyglot monorepo for **Manch**, a domain-free substrate for building agents o
 
 ## Prerequisites
 
-- **Rust** ≥ 1.85 (edition 2024) with `rustfmt` and `clippy`.
+- **Rust** ≥ 1.88 (edition 2024) with `rustfmt` and `clippy`.
 - **Node** ≥ 20 and **pnpm** `9.15.0` (`corepack enable` or install pnpm directly).
 - **protoc** (Protocol Buffers compiler) — **required** to build `manch-server`; its `build.rs` invokes `protoc` to compile `proto/`. Install via your package manager (`apt install protobuf-compiler`, `brew install protobuf`, …).
 - **Linux only:** GTK/WebKit dev libraries to build the Tauri desktop app — `libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf`. (macOS/Windows pull these from the system SDK.)

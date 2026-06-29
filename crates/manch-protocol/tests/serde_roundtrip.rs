@@ -1,7 +1,7 @@
 //! Property tests: the protocol's own serializable types must survive a JSON
 //! round-trip unchanged. A stable wire contract is the reason this crate exists.
 
-use agent_client_protocol::schema::{ContentBlock, TextContent, ToolKind};
+use agent_client_protocol::schema::v1::{ContentBlock, TextContent, ToolKind};
 use manch_protocol::{Context, ToolSchema};
 use proptest::prelude::*;
 

@@ -13,6 +13,19 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 1024;
 const CLAUDE_CODE_PKG: &str = "@agentclientprotocol/claude-agent-acp@latest";
 
+/// reqwest 0.13's `rustls-no-provider` feature ships no crypto backend, so a
+/// rustls [`CryptoProvider`] must be installed process-wide before the first
+/// `reqwest::Client` is built — otherwise construction panics. We install `ring`
+/// (the same backend reqwest 0.12's `rustls-tls` used) exactly once; a second
+/// call is a no-op, and an `Err` here means something already installed one.
+fn ensure_crypto_provider() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provider {
     Anthropic,
@@ -130,6 +143,7 @@ impl AnthropicAgent {
 #[async_trait]
 impl ChatAgent for AnthropicAgent {
     async fn ask(&self, prompt: &str) -> Result<String, String> {
+        ensure_crypto_provider();
         let resp = reqwest::Client::new()
             .post(ANTHROPIC_URL)
             .header("x-api-key", &self.api_key)
@@ -166,11 +180,11 @@ impl ChatAgent for ClaudeCodeAgent {
     async fn ask(&self, prompt: &str) -> Result<String, String> {
         use std::sync::{Arc, Mutex};
 
-        use agent_client_protocol::schema::{
+        use agent_client_protocol::schema::ProtocolVersion;
+        use agent_client_protocol::schema::v1::{
             ContentBlock, ContentChunk, InitializeRequest, NewSessionRequest, PromptRequest,
-            ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-            RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
-            SessionUpdate, TextContent,
+            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+            SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
         };
         use agent_client_protocol::{self as acp, AcpAgent, Agent, Client, ConnectionTo};
 

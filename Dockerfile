@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ── Build stage ───────────────────────────────────────
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /build
 # manch-server's build.rs runs connectrpc-build, which spawns `protoc` to compile
 # proto/manch/v1/manch.proto — so protoc must be installed.

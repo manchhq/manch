@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 /// Re-exported Agent Client Protocol vocabulary. Manch speaks ACP's types; it
 /// does not define parallel content/event enums.
 pub mod acp {
-    pub use agent_client_protocol::schema::{
+    pub use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification,
         SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
         ToolCallUpdateFields, ToolKind,

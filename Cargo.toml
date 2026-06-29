@@ -7,15 +7,15 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/manchhq/manch"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Foundation crates (already published under the manchhq org)
-katha = "0.1"
-kathputli = "0.1"
+katha = "0"
+kathputli = "0"
 
 # Official Agent Client Protocol SDK — Manch builds on this, it does not reinvent it.
-agent-client-protocol = "0.14"
+agent-client-protocol = "1"
 
 # Shared third-party deps
 async-trait = "0.1"
