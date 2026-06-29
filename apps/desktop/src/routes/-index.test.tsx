@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Provider, createStore } from "jotai";
@@ -22,6 +22,10 @@ function wrap(children: ReactNode, store = createStore()) {
 }
 
 describe("Home route", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it("shows Settings/first-run when there are no conversations", () => {
     render(wrap(<Home />));
     expect(screen.getByText("Add a provider key")).toBeTruthy();
