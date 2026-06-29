@@ -9,7 +9,7 @@ describe("PerformancePanel", () => {
       toolCalls={[{ id: "t1", name: "read_file", status: "done", detail: "parser.rs" }]}
       files={["parser.rs", "lexer.rs"]}
     />);
-    expect(screen.getAllByRole("status")[0].getAttribute("data-status")).toBe("busy");
+    expect(screen.getByRole("status").getAttribute("data-status")).toBe("busy");
     expect(screen.getByText("read_file")).toBeTruthy();
     expect(screen.getByText("lexer.rs")).toBeTruthy();
   });

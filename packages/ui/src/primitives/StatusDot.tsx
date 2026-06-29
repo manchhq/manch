@@ -7,9 +7,13 @@ const TONE: Record<AgentStatus, string> = {
   error: "bg-error",
 };
 
-export function StatusDot({ status, label }: { status: AgentStatus; label?: string }) {
+export function StatusDot({ status, label, live = true }: { status: AgentStatus; label?: string; live?: boolean }) {
   return (
-    <span role="status" data-status={status} className="inline-flex items-center gap-2 text-sm text-base-content/70">
+    <span
+      {...(live ? { role: "status" } : {})}
+      data-status={status}
+      className="inline-flex items-center gap-2 text-sm text-base-content/70"
+    >
       <span className={`inline-block size-2 rounded-full ${TONE[status]}`} />
       {label}
     </span>
