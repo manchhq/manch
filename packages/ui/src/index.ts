@@ -4,3 +4,4 @@ export { VersionBadge } from "./VersionBadge";
 export type { VersionBadgeProps } from "./VersionBadge";
 export { StatusDot } from "./primitives/StatusDot";
 export { Badge } from "./primitives/Badge";
+export { Panel } from "./primitives/Panel";
