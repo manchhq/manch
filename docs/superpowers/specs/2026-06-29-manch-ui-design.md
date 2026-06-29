@@ -69,7 +69,8 @@ apps/desktop/src/                ← routes + wiring only
   routes/      __root.tsx (3-pane shell), index.tsx
   containers/  GreenRoom, Stage, Performance, Settings  (connect store/engine → @manch/ui)
   engine/      StageEngine.ts, mockEngine.ts, tauriEngine.ts
-  store/       conversations.ts (Zustand, persisted)
+  store/       atoms.ts (jotai; atomWithStorage for panels + mock sessions)
+  data/        queries.ts (React Query hooks over Tauri commands)
 ```
 
 ## Layout & information architecture
@@ -108,22 +109,40 @@ restrained neutral within the same token structure.
 
 ## State management
 
-A small **Zustand** store (`store/conversations.ts`) holds sessions, messages,
-the active conversation id, and panel/collapse state; persisted to `localStorage`
-(panel + layout + mock sessions). React Query is already installed but this is
-local UI state, not server cache — Zustand fits. Agent markdown output is rendered
-with a lightweight markdown renderer.
+Two kinds of state, two tools, each for its strength:
+
+- **React Query (TanStack Query)** — the data/command layer. Every Tauri `invoke`
+  (and later ConnectRPC) goes through it: `list_configured_providers` is a cached
+  query; `save_api_key` and `send_prompt` are mutations with built-in
+  pending/error state. Already a dependency.
+- **jotai** — local UI state: active conversation id, panel collapse (via
+  `atomWithStorage` for persistence), composer text, and the in-flight streaming
+  transcript assembled from `StageEngine` events. Atomic subscriptions let each
+  panel read only the atoms it needs (no selector boilerplate, no over-rendering).
+
+How they compose: `send` is a React Query **mutation** whose `mutationFn` consumes
+the `StageEngine` async stream and pushes events into a jotai atom as they arrive;
+on `done` it commits the finished message into the conversation's message atom.
+React Query owns the request lifecycle; jotai owns the accumulated UI state.
+
+This respects the package split: jotai + React Query live in `apps/desktop`
+(connected); no state library is imported by `@manch/ui` (presentation only).
+
+Agent markdown output is rendered with **react-markdown + remark-gfm** inside the
+`@manch/ui` `Message` component (a `rehype` syntax highlighter can be added later;
+the first cut styles code blocks with the warm mono + theme tokens).
 
 ## Data flow & the mock seam
 
 ```
 Composer.send(text)
-  → store.appendUserMessage()
-  → StageEngine.send(provider, text)
+  → append user message to the conversation's jotai atom
+  → React Query mutation runs StageEngine.send(provider, text):
         mockEngine:  emits token deltas + a scripted read_file tool-call,
                      status running → done, then Done
         tauriEngine: invoke("send_prompt") → one assistant message
-  → store consumes events → Transcript spotlight + Performance panel update
+  → mutationFn pushes each event into the live-transcript jotai atom
+  → on Done, commit the assembled message; panels re-render from their atoms
 ```
 
 `StageEngine` is the single swap point. `mockEngine` drives the rich demo
@@ -180,3 +199,6 @@ interface StageEngine {
 - Keeps `apps/desktop/src/lib/api.ts` (Tauri wrappers) as the `tauriEngine`'s
   dependency.
 - Promotes/extends `@manch/ui` beyond `Button` + `VersionBadge`.
+- **New dependencies:** `jotai`, `react-markdown`, `remark-gfm` (React Query
+  already present). `react-markdown` + `remark-gfm` are `@manch/ui` deps; `jotai`
+  is an `apps/desktop` dep.
