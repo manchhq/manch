@@ -7,3 +7,4 @@ export { Badge } from "./primitives/Badge";
 export { Panel } from "./primitives/Panel";
 export { IconRail } from "./primitives/IconRail";
 export { Spotlight } from "./primitives/Spotlight";
+export { Message } from "./stage/Message";
