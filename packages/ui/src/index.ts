@@ -12,3 +12,4 @@ export { ToolCallCard } from "./stage/ToolCallCard";
 export { Transcript } from "./stage/Transcript";
 export { Composer } from "./stage/Composer";
 export { StageHeader } from "./stage/StageHeader";
+export { GreenRoomView } from "./stage/GreenRoomView";
