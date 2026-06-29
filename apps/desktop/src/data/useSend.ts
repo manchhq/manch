@@ -27,21 +27,26 @@ export function useSend(engine: StageEngine) {
 
     void (async () => {
       let live: LiveState = emptyLive;
+      let errored = false;
       try {
         for await (const ev of engine.send(provider, text)) {
           live = applyEvent(live, ev);
           if (ev.kind === "token") setStreamingText(live.text);
           if (ev.kind === "tool") setLiveToolCalls(live.toolCalls);
-          if (ev.kind === "error") { setStatus("error"); break; }
+          if (ev.kind === "error") { setStatus("error"); errored = true; break; }
         }
-        appendMessage(activeId, { id: `m_${Date.now()}_a`, role: "agent", text: live.text || "(no output)" });
-        setConversations((cs) => cs.map((c) => c.id === activeId ? { ...c, toolCalls: live.toolCalls } : c));
-        setStatus("done");
+        if (!errored) {
+          appendMessage(activeId, { id: `m_${Date.now()}_a`, role: "agent", text: live.text || "(no output)" });
+          setConversations((cs) => cs.map((c) => c.id === activeId ? { ...c, toolCalls: live.toolCalls } : c));
+          setStatus("done");
+        }
       } finally {
-        setIsStreaming(false); setStreamingText("");
+        setIsStreaming(false);
+        setStreamingText("");
+        setLiveToolCalls([]);
       }
     })();
   }, [activeId, isStreaming, engine, appendMessage, setConversations, setStreamingText, setLiveToolCalls, setStatus, setIsStreaming]);
 
-  return { send, busy: isStreaming, conversationsCount: conversations.length };
+  return { send, busy: isStreaming };
 }
