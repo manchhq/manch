@@ -33,4 +33,6 @@ export { TeamCard } from "./teams/TeamCard";
 export type { TeamCardProps, TeamSummary } from "./teams/TeamCard";
 export { TeamList } from "./teams/TeamList";
 export type { TeamListProps } from "./teams/TeamList";
+export { TeamComposer } from "./teams/TeamComposer";
+export type { TeamComposerProps, TeamComposerValue, ComposerMember } from "./teams/TeamComposer";
 export * from "./types";
