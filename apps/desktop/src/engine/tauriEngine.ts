@@ -1,10 +1,15 @@
 import { sendPrompt } from "../lib/api";
+import { isProvider } from "../lib/providers";
 import type { StageEngine, StageEvent } from "./StageEngine";
 
 export const tauriEngine: StageEngine = {
   async *send(provider: string, text: string): AsyncIterable<StageEvent> {
     try {
-      const reply = await sendPrompt(provider as never, text);
+      if (!isProvider(provider)) {
+        yield { kind: "error", message: `Unknown provider: ${provider}` };
+        return;
+      }
+      const reply = await sendPrompt(provider, text);
       yield { kind: "token", text: reply };
       yield { kind: "done" };
     } catch (e) {
