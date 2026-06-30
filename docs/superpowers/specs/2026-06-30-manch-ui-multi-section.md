@@ -61,6 +61,10 @@ workspaces, teams, and schedules are persisted as CRUD entities.
    `Db`. Not a TS-only mock layer.
 3. **Drop the custom `manch-stage` theme**; use daisyUI built-in themes with
    `dark` as the default and a Settings theme picker.
+4. **Generate TS types from Rust DTOs with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs)** —
+   no hand-mirrored types. DTOs live in a new **publishable** crate
+   `crates/manch-dto` (alongside `manch-protocol`); a generator combines them into
+   a single `bindings.ts` consumed by the client.
 
 ## Information architecture
 
@@ -164,10 +168,32 @@ Persisted CRUD: workspaces, teams, schedules. Computed/mock (not stored):
 `assign_team_task`, `search` (queries stored entities), `cross_verify`. Existing
 `save_api_key` / `list_configured_providers` / `send_prompt` are unchanged.
 
-Rust structs derive `serde::{Serialize, Deserialize}` and are mirrored as TS
-types in `@manch/ui`'s `types.ts` (or a `data/types.ts` in the app for
-command-only shapes). React Query wraps every `invoke`; TanStack Form drives
-create/edit forms.
+### DTO crate + type generation (`ts-rs`)
+
+All command request/response shapes (`Workspace`, `Team`, `TeamMember`,
+`TeamRun`, `Schedule`, `SearchHit`, `CrossVerify`, `Report`, input structs, …)
+are defined **once** in a new crate `crates/manch-dto`:
+
+- Each struct derives `serde::{Serialize, Deserialize}` always, and `ts_rs::TS`
+  **conditionally** — `#[cfg_attr(feature = "ts", derive(TS))]`. (No `ts(export,
+  export_to)` attribute is needed: the generator calls `export_to_string`
+  directly rather than the cargo-test auto-export.) The crate is publishable (see
+  Versioning), so `ts-rs` is an **optional** dependency behind a `ts` feature; the
+  default build is lean serde-only.
+- A generator binary `src/bin/gen-types.rs` (`required-features = ["ts"]`) calls
+  `TS::export_to_string` for every DTO, strips per-type `import` lines (all types
+  land in one file), concatenates them under a "DO NOT EDIT — generated" header,
+  and writes a single combined file to `apps/desktop/src/data/bindings.ts`.
+- `src-tauri` depends on `manch-dto` (default features) and uses these structs
+  directly as command parameter/return types — so the wire contract has one
+  source of truth.
+
+`just gen` is extended to run `cargo run -p manch-dto --features ts --bin
+gen-types` (after the proto step). The generated `bindings.ts` is **gitignored
+and regenerated** (mirrors `@manch/api/src/gen/`); CI's `gen` step (which runs
+before `lint`) produces it. The client imports DTO types from `bindings.ts`.
+
+React Query wraps every `invoke`; TanStack Form drives create/edit forms.
 
 DB notes: keep the single `Mutex<Connection>`; never hold the lock across an
 `await`. New tables use text primary keys (uuid-like ids generated in Rust). All
@@ -197,8 +223,16 @@ new DB methods get unit tests like the existing `db.rs` tests
   + `WorkspaceSettings`, `CompareView`, `EmptyState`, and a `Dialog` primitive.
   No imports of `@tauri-apps/api`, the store, or the router.
 - **`apps/desktop`** — routes + containers that wire store/queries/engine into the
-  `@manch/ui` views; the Rust commands; the React Query hooks; the TanStack Form
-  orchestration via `onSubmit` callbacks.
+  `@manch/ui` views; the React Query hooks; the TanStack Form orchestration via
+  `onSubmit` callbacks. Imports the generated `data/bindings.ts` (the DTO types)
+  for command shapes.
+- **`crates/manch-dto`** — the DTO structs (one source of truth for command
+  shapes) + the `gen-types` binary. `src-tauri` depends on it for command
+  signatures.
+
+`@manch/ui` keeps its own presentational prop types (it must build standalone and
+not depend on app-generated bindings); those types structurally match the DTOs.
+Only the `apps/desktop` data layer imports `bindings.ts`.
 
 ## States to handle
 
@@ -235,7 +269,9 @@ new DB methods get unit tests like the existing `db.rs` tests
 0. Theme-agnostic refactor + app shell/nav rail + workspace switcher + workspace
    context atom + routing skeleton.
 1. Settings page (providers + theme picker + workspaces management).
-2. Rust data layer (tables, CRUD, seed, commands) + TS types + React Query hooks.
+2. `crates/manch-dto` (DTO structs + `ts` feature + `gen-types` bin) + `just gen`
+   wiring → Rust data layer in `src-tauri` (tables, CRUD, seed, commands using the
+   DTOs) → generated `bindings.ts` + React Query hooks.
 3. Teams (list, both create paths, detail, assign-task run).
 4. Schedule (list + create form).
 5. Search (query + typed results).
@@ -256,6 +292,19 @@ Each phase: `@manch/ui` components (test + story) first, then container wiring;
 - `apps/desktop/src/lib/providers.ts` (`ALL_PROVIDERS`) and `lib/api.ts`
   (`PROVIDERS`) unified into one source (resolves a PR #14 follow-up).
 - `apps/desktop/src-tauri/src/db.rs` extended; `commands.rs` + `lib.rs` gain the
-  new commands.
-- **New dependencies:** `@tanstack/react-form` (app, and/or `@manch/ui` for form
-  components). React Query, jotai, react-markdown, remark-gfm already present.
+  new commands (using `manch-dto` structs).
+- **New crate** `crates/manch-dto` (publishable) + a row in the AGENTS.md /
+  README repository map.
+- `Justfile` `gen` recipe extended (proto → dto types); `.gitignore` gains
+  `apps/desktop/src/data/bindings.ts`.
+- **New dependencies:** `ts-rs` (optional, `crates/manch-dto`, behind `ts`
+  feature); `@tanstack/react-form` (app, and/or `@manch/ui` for form components).
+  React Query, jotai, react-markdown, remark-gfm already present.
+
+## Versioning & releases
+
+`manch-dto` is `publish = true` and versioned independently by `release-plz` (same
+as `manch-protocol`) — it needs the publish metadata (`description`, `license`,
+`repository`) in its `Cargo.toml`. Don't hand-bump its version; Conventional
+Commit subjects drive it. `ts-rs` being optional keeps the published crate lean
+for downstream consumers who only want the serde DTOs.
