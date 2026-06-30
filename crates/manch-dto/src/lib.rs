@@ -20,3 +20,90 @@ pub struct CreateWorkspace {
     pub name: String,
     pub description: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct TeamMember {
+    pub role: String,
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct Team {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub problem: String,
+    pub members: Vec<TeamMember>,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct CreateTeam {
+    pub workspace_id: String,
+    pub name: String,
+    pub problem: String,
+    pub auto: bool,
+    pub members: Vec<TeamMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct RunStep {
+    pub member_role: String,
+    pub detail: String,
+    pub status: String, // "running"|"done"|"error"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct TeamRun {
+    pub team_id: String,
+    pub task: String,
+    pub steps: Vec<RunStep>,
+    pub result: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct Schedule {
+    pub id: String,
+    pub workspace_id: String,
+    pub target: String,
+    pub cadence: String,
+    pub next_run: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct CreateSchedule {
+    pub workspace_id: String,
+    pub target: String,
+    pub cadence: String,
+    pub next_run: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct SearchHit {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct Report {
+    pub provider: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+pub struct CrossVerify {
+    pub reports: Vec<Report>,
+    pub summary: String,
+}
