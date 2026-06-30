@@ -18,3 +18,22 @@ describe("atoms", () => {
     expect(store.get(activeConversationAtom)?.id).toBe(c.id);
   });
 });
+
+import { themeAtom, activeWorkspaceIdAtom, THEMES } from "./atoms";
+
+it("defaults theme to dark and persists a change", () => {
+  const store = createStore();
+  expect(store.get(themeAtom)).toBe("dark");
+  store.set(themeAtom, "dracula");
+  expect(store.get(themeAtom)).toBe("dracula");
+  expect(localStorage.getItem("manch.theme")).toContain("dracula");
+});
+
+it("exposes the configured theme set including dark", () => {
+  expect(THEMES).toContain("dark");
+});
+
+it("active workspace id defaults to null", () => {
+  const store = createStore();
+  expect(store.get(activeWorkspaceIdAtom)).toBeNull();
+});
