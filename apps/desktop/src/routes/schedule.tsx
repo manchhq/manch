@@ -1,8 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { EmptyState } from "@manch/ui";
+import SchedulePage from "../containers/SchedulePage";
 
-export const Route = createFileRoute("/schedule")({ component: Schedule });
-
-function Schedule() {
-  return <EmptyState glyph="📅" title="Schedule" description="Coming soon." />;
-}
+export const Route = createFileRoute("/schedule")({ component: SchedulePage });
