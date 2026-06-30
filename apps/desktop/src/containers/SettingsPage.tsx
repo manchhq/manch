@@ -1,7 +1,7 @@
 import { useAtom } from "jotai";
 import { SettingsView, ProviderSettings, ThemePicker, WorkspaceSettings } from "@manch/ui";
 import { themeAtom, THEMES } from "../store/atoms";
-import { ALL_PROVIDERS } from "../lib/providers";
+import { ALL_PROVIDERS, type Provider } from "../lib/providers";
 import {
   useConfiguredProviders,
   useSaveApiKey,
@@ -25,7 +25,7 @@ export default function SettingsPage() {
           all={ALL_PROVIDERS}
           configured={providers.data ?? []}
           saving={save.isPending}
-          onSave={(provider, apiKey) => save.mutate({ provider: provider as never, apiKey })}
+          onSave={(provider, apiKey) => save.mutate({ provider: provider as Provider, apiKey })}
         />
       }
       theme={<ThemePicker themes={THEMES} active={theme} onSelect={setTheme} />}

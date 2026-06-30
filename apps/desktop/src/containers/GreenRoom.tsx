@@ -1,16 +1,12 @@
-import { useAtom, useSetAtom } from "jotai";
+import { useAtom } from "jotai";
+import { useNavigate } from "@tanstack/react-router";
 import { GreenRoomView } from "@manch/ui";
-import {
-  activeIdAtom,
-  conversationsAtom,
-  newConversation,
-  settingsOpenAtom,
-} from "../store/atoms";
+import { activeIdAtom, conversationsAtom, newConversation } from "../store/atoms";
 
 export default function GreenRoom() {
   const [conversations, setConversations] = useAtom(conversationsAtom);
   const [activeId, setActiveId] = useAtom(activeIdAtom);
-  const setSettingsOpen = useSetAtom(settingsOpenAtom);
+  const navigate = useNavigate();
 
   return (
     <GreenRoomView
@@ -22,7 +18,7 @@ export default function GreenRoom() {
         setConversations((cs) => [c, ...cs]);
         setActiveId(c.id);
       }}
-      onOpenSettings={() => setSettingsOpen(true)}
+      onOpenSettings={() => navigate({ to: "/settings" })}
     />
   );
 }

@@ -31,8 +31,6 @@ export const activeConversationAtom = atom((get) => {
   return get(conversationsAtom).find((c) => c.id === id) ?? null;
 });
 
-export const settingsOpenAtom = atom<boolean>(false);
-
 export const THEMES = ["dark", "light", "dracula", "nord", "cupcake"];
 export const themeAtom = atomWithStorage<string>("manch.theme", "dark");
 export const activeWorkspaceIdAtom = atomWithStorage<string | null>("manch.activeWorkspace", null);
