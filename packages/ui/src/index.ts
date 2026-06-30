@@ -12,6 +12,8 @@ export { Spotlight } from "./primitives/Spotlight";
 export { NavRail } from "./primitives/NavRail";
 export type { NavItem, NavRailProps } from "./primitives/NavRail";
 export { Message } from "./stage/Message";
+export { CompareView } from "./stage/CompareView";
+export type { CompareReport, CompareViewProps } from "./stage/CompareView";
 export { ToolCallCard } from "./stage/ToolCallCard";
 export { Transcript } from "./stage/Transcript";
 export { Composer } from "./stage/Composer";
