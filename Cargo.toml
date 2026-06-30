@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/manch-protocol", "apps/server", "apps/desktop/src-tauri"]
+members = ["crates/manch-protocol", "crates/manch-dto", "apps/server", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.0.0"
@@ -32,5 +32,9 @@ buffa-types = { version = "0.7", features = ["json"] }
 axum = "0.8"
 http-body = "1"
 
+# TypeScript type generation
+ts-rs = "12"
+
 # Internal crates
 manch-protocol = { path = "crates/manch-protocol", version = "0.0.1" }
+manch-dto = { path = "crates/manch-dto", version = "0.0.1" }

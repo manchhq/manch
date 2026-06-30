@@ -1,0 +1,19 @@
+[package]
+name = "manch-dto"
+description = "Shared data-transfer objects for the Manch desktop app, with optional TypeScript generation via ts-rs."
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+ts = ["dep:ts-rs"]
+
+[dependencies]
+serde = { workspace = true }
+ts-rs = { workspace = true, optional = true }
+
+[[bin]]
+name = "gen-types"
+required-features = ["ts"]

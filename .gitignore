@@ -16,3 +16,6 @@ apps/desktop/src-tauri/target/
 
 # Storybook build output
 storybook-static/
+
+# Generated DTO TypeScript bindings (regenerated from Rust via `just gen`)
+apps/desktop/src/data/bindings.ts

@@ -24,3 +24,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 agent-client-protocol = { version = "1", features = ["unstable"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+manch-dto = { workspace = true }

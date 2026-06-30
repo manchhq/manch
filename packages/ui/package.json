@@ -15,8 +15,11 @@
     "build-storybook": "storybook build"
   },
   "dependencies": {
+    "@tanstack/react-form": "^1.33.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@storybook/addon-essentials": "^8.4.7",

@@ -50,6 +50,7 @@ Always prefer the `just` recipes over raw `cargo`/`pnpm` so you run exactly what
 | Path | Crate / package | What it is |
 |------|-----------------|------------|
 | `crates/manch-protocol` | `manch-protocol` (published lib) | The four trait contracts — `Agent`, `Tool`, `Channel`, `MemoryStore` — plus re-exported ACP vocabulary. The stable wire contract. |
+| `crates/manch-dto` | `manch-dto` (published lib) | Shared DTOs for the desktop app; generates `bindings.ts` via `ts-rs` (feature `ts`). |
 | `apps/server` | `manch-server` | Optional self-hostable server exposing the core over ConnectRPC (Axum). Has a `build.rs` that compiles `proto/` (needs `protoc`). Docker-only delivery. |
 | `apps/desktop/src-tauri` | `manch-desktop` | The Tauri (Rust) desktop shell. Needs GTK/WebKit on Linux. |
 | `apps/desktop` | `@manch/desktop` | Desktop frontend — Vite + React 19. |

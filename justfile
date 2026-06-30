@@ -11,9 +11,10 @@ setup:
     just gen
     pnpm exec lefthook install
 
-# Generate protobuf TS bindings (buf) into packages/api/src/gen
+# Generate protobuf TS bindings (buf) + DTO TS bindings (ts-rs)
 gen:
     pnpm generate
+    cargo run -p manch-dto --features ts --bin gen-types
 
 # ── Quality ───────────────────────────────────────────
 # Format all Rust code

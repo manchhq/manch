@@ -3,6 +3,35 @@
 
 use rusqlite::{Connection, OptionalExtension};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn new_id(prefix: &str) -> String {
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}{t:x}{n:x}")
+}
+
+fn row_to_team(r: &rusqlite::Row<'_>) -> rusqlite::Result<manch_dto::Team> {
+    let members_json: String = r.get(4)?;
+    let caps_json: String = r.get(5)?;
+    let members: Vec<manch_dto::TeamMember> =
+        serde_json::from_str(&members_json).unwrap_or_default();
+    let capabilities: Vec<String> = serde_json::from_str(&caps_json).unwrap_or_default();
+    Ok(manch_dto::Team {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        name: r.get(2)?,
+        problem: r.get(3)?,
+        members,
+        capabilities,
+    })
+}
 
 /// Owns the SQLite connection behind a mutex so it can live in Tauri state.
 pub struct Db(Mutex<Connection>);
@@ -31,6 +60,99 @@ impl Db {
              )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS workspaces (
+                 id          TEXT PRIMARY KEY,
+                 name        TEXT NOT NULL,
+                 description TEXT NOT NULL DEFAULT ''
+             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS teams (
+                 id           TEXT PRIMARY KEY,
+                 workspace_id TEXT NOT NULL,
+                 name         TEXT NOT NULL,
+                 problem      TEXT NOT NULL DEFAULT '',
+                 members      TEXT NOT NULL DEFAULT '[]',
+                 capabilities TEXT NOT NULL DEFAULT '[]'
+             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schedules (
+                 id           TEXT PRIMARY KEY,
+                 workspace_id TEXT NOT NULL,
+                 target       TEXT NOT NULL,
+                 cadence      TEXT NOT NULL,
+                 next_run     TEXT NOT NULL
+             )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_workspaces(&self) -> rusqlite::Result<Vec<manch_dto::Workspace>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, name, description FROM workspaces ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(manch_dto::Workspace {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn create_workspace(
+        &self,
+        name: &str,
+        description: &str,
+    ) -> rusqlite::Result<manch_dto::Workspace> {
+        let id = new_id("ws_");
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, name, description) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, name, description],
+        )?;
+        Ok(manch_dto::Workspace {
+            id,
+            name: name.into(),
+            description: description.into(),
+        })
+    }
+
+    pub fn rename_workspace(&self, id: &str, name: &str) -> rusqlite::Result<manch_dto::Workspace> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE workspaces SET name = ?2 WHERE id = ?1",
+            rusqlite::params![id, name],
+        )?;
+        conn.query_row(
+            "SELECT id, name, description FROM workspaces WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(manch_dto::Workspace {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                })
+            },
+        )
+    }
+
+    pub fn delete_workspace(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn seed_defaults(&self) -> rusqlite::Result<()> {
+        if self.list_workspaces()?.is_empty() {
+            self.create_workspace("My workspace", "Default workspace")?;
+        }
         Ok(())
     }
 
@@ -63,11 +185,167 @@ impl Db {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
+
+    pub fn create_team(&self, input: manch_dto::CreateTeam) -> rusqlite::Result<manch_dto::Team> {
+        let id = new_id("tm_");
+        let members = if input.auto && input.members.is_empty() {
+            vec![
+                manch_dto::TeamMember {
+                    role: "Researcher".into(),
+                    provider: "anthropic".into(),
+                },
+                manch_dto::TeamMember {
+                    role: "Analyst".into(),
+                    provider: "anthropic".into(),
+                },
+                manch_dto::TeamMember {
+                    role: "Critic".into(),
+                    provider: "claude-code".into(),
+                },
+            ]
+        } else {
+            input.members
+        };
+        let capabilities = vec![
+            "read_file".to_string(),
+            "search".to_string(),
+            "write_report".to_string(),
+        ];
+        let members_json = serde_json::to_string(&members).unwrap();
+        let caps_json = serde_json::to_string(&capabilities).unwrap();
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO teams (id, workspace_id, name, problem, members, capabilities) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![id, input.workspace_id, input.name, input.problem, members_json, caps_json],
+        )?;
+        Ok(manch_dto::Team {
+            id,
+            workspace_id: input.workspace_id,
+            name: input.name,
+            problem: input.problem,
+            members,
+            capabilities,
+        })
+    }
+
+    pub fn list_teams(&self, workspace_id: &str) -> rusqlite::Result<Vec<manch_dto::Team>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, name, problem, members, capabilities FROM teams WHERE workspace_id = ?1 ORDER BY name",
+        )?;
+        let rows = stmt.query_map([workspace_id], row_to_team)?;
+        rows.collect()
+    }
+
+    pub fn get_team(&self, id: &str) -> rusqlite::Result<Option<manch_dto::Team>> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(
+            "SELECT id, workspace_id, name, problem, members, capabilities FROM teams WHERE id = ?1",
+            [id],
+            row_to_team,
+        )
+        .optional()
+    }
+
+    pub fn create_schedule(
+        &self,
+        input: manch_dto::CreateSchedule,
+    ) -> rusqlite::Result<manch_dto::Schedule> {
+        let id = new_id("sch_");
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO schedules (id, workspace_id, target, cadence, next_run) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, input.workspace_id, input.target, input.cadence, input.next_run],
+        )?;
+        Ok(manch_dto::Schedule {
+            id,
+            workspace_id: input.workspace_id,
+            target: input.target,
+            cadence: input.cadence,
+            next_run: input.next_run,
+        })
+    }
+
+    pub fn search(
+        &self,
+        workspace_id: &str,
+        query: &str,
+        kinds: &[String],
+    ) -> rusqlite::Result<Vec<manch_dto::SearchHit>> {
+        let q = query.to_lowercase();
+        let mut hits = Vec::new();
+        let want = |k: &str| kinds.is_empty() || kinds.iter().any(|x| x == k);
+        if want("team") {
+            for t in self.list_teams(workspace_id)? {
+                if t.name.to_lowercase().contains(&q) || t.problem.to_lowercase().contains(&q) {
+                    hits.push(manch_dto::SearchHit {
+                        kind: "team".into(),
+                        id: t.id,
+                        title: t.name,
+                        snippet: t.problem,
+                    });
+                }
+            }
+        }
+        if want("schedule") {
+            for s in self.list_schedules(workspace_id)? {
+                if s.target.to_lowercase().contains(&q) {
+                    hits.push(manch_dto::SearchHit {
+                        kind: "schedule".into(),
+                        id: s.id,
+                        title: s.target,
+                        snippet: s.cadence,
+                    });
+                }
+            }
+        }
+        Ok(hits)
+    }
+
+    pub fn list_schedules(&self, workspace_id: &str) -> rusqlite::Result<Vec<manch_dto::Schedule>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, target, cadence, next_run FROM schedules WHERE workspace_id = ?1 ORDER BY next_run",
+        )?;
+        let rows = stmt.query_map([workspace_id], |r| {
+            Ok(manch_dto::Schedule {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                target: r.get(2)?,
+                cadence: r.get(3)?,
+                next_run: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_crud_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.list_workspaces().unwrap().is_empty());
+        let w = db.create_workspace("Legal", "case work").unwrap();
+        assert_eq!(w.name, "Legal");
+        let all = db.list_workspaces().unwrap();
+        assert_eq!(all.len(), 1);
+        let renamed = db.rename_workspace(&w.id, "Legal research").unwrap();
+        assert_eq!(renamed.name, "Legal research");
+        db.delete_workspace(&w.id).unwrap();
+        assert!(db.list_workspaces().unwrap().is_empty());
+    }
+
+    #[test]
+    fn seed_inserts_one_default_workspace_only_when_empty() {
+        let db = Db::open_in_memory().unwrap();
+        db.seed_defaults().unwrap();
+        assert_eq!(db.list_workspaces().unwrap().len(), 1);
+        db.seed_defaults().unwrap(); // idempotent
+        assert_eq!(db.list_workspaces().unwrap().len(), 1);
+    }
 
     #[test]
     fn save_then_get_roundtrips() {
@@ -99,5 +377,67 @@ mod tests {
         db.save_key("gemini", "g").unwrap();
         db.save_key("anthropic", "a").unwrap();
         assert_eq!(db.list_providers().unwrap(), vec!["anthropic", "gemini"]);
+    }
+
+    #[test]
+    fn schedule_crud_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        let ws = db.create_workspace("w", "").unwrap();
+        let s = db
+            .create_schedule(manch_dto::CreateSchedule {
+                workspace_id: ws.id.clone(),
+                target: "Discovery team".into(),
+                cadence: "daily".into(),
+                next_run: "2026-07-01T09:00:00Z".into(),
+            })
+            .unwrap();
+        assert_eq!(s.cadence, "daily");
+        assert_eq!(db.list_schedules(&ws.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_finds_team_by_name_substring() {
+        let db = Db::open_in_memory().unwrap();
+        let ws = db.create_workspace("w", "").unwrap();
+        let _team = db
+            .create_team(manch_dto::CreateTeam {
+                workspace_id: ws.id.clone(),
+                name: "Discovery team".into(),
+                problem: "find legal precedent".into(),
+                auto: false,
+                members: vec![],
+            })
+            .unwrap();
+        // "scovery" is a substring of "Discovery team" (case-insensitive)
+        let hits = db.search(&ws.id, "scovery", &[]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, "team");
+        assert_eq!(hits[0].title, "Discovery team");
+        // filter by kind="schedule" must return nothing
+        let schedule_hits = db
+            .search(&ws.id, "scovery", &["schedule".to_string()])
+            .unwrap();
+        assert!(schedule_hits.is_empty());
+    }
+
+    #[test]
+    fn team_crud_with_members_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        let ws = db.create_workspace("w", "").unwrap();
+        let input = manch_dto::CreateTeam {
+            workspace_id: ws.id.clone(),
+            name: "Discovery".into(),
+            problem: "find precedent".into(),
+            auto: false,
+            members: vec![manch_dto::TeamMember {
+                role: "researcher".into(),
+                provider: "anthropic".into(),
+            }],
+        };
+        let team = db.create_team(input).unwrap();
+        assert_eq!(team.members.len(), 1);
+        let got = db.get_team(&team.id).unwrap().unwrap();
+        assert_eq!(got.name, "Discovery");
+        assert_eq!(db.list_teams(&ws.id).unwrap().len(), 1);
     }
 }

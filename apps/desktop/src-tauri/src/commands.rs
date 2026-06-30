@@ -2,6 +2,10 @@
 
 use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
+use manch_dto::{
+    CreateSchedule, CreateTeam, CreateWorkspace, CrossVerify, Report, RunStep, Schedule, SearchHit,
+    Team, TeamRun, Workspace,
+};
 use tauri::State;
 
 #[tauri::command]
@@ -46,4 +50,118 @@ pub async fn send_prompt(
         }
     };
     agent.ask(&text).await
+}
+
+#[tauri::command]
+pub fn list_workspaces(state: State<Db>) -> Result<Vec<Workspace>, String> {
+    state.list_workspaces().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_workspace(state: State<Db>, input: CreateWorkspace) -> Result<Workspace, String> {
+    state
+        .create_workspace(&input.name, &input.description)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_workspace(state: State<Db>, id: String, name: String) -> Result<Workspace, String> {
+    state
+        .rename_workspace(&id, &name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_workspace(state: State<Db>, id: String) -> Result<(), String> {
+    state.delete_workspace(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_teams(state: State<Db>, workspace_id: String) -> Result<Vec<Team>, String> {
+    state.list_teams(&workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_team(state: State<Db>, input: CreateTeam) -> Result<Team, String> {
+    state.create_team(input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_team(state: State<Db>, id: String) -> Result<Team, String> {
+    state
+        .get_team(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "team not found".into())
+}
+
+#[tauri::command]
+pub fn list_schedules(state: State<Db>, workspace_id: String) -> Result<Vec<Schedule>, String> {
+    state
+        .list_schedules(&workspace_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_schedule(state: State<Db>, input: CreateSchedule) -> Result<Schedule, String> {
+    state.create_schedule(input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn search(
+    state: State<Db>,
+    workspace_id: String,
+    query: String,
+    kinds: Vec<String>,
+) -> Result<Vec<SearchHit>, String> {
+    state
+        .search(&workspace_id, &query, &kinds)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cross_verify(providers: Vec<String>, text: String) -> Result<CrossVerify, String> {
+    if providers.is_empty() {
+        return Err("select at least one provider".into());
+    }
+    let reports = providers
+        .iter()
+        .map(|p| Report {
+            provider: p.clone(),
+            text: format!("**{p}** analysis of \"{text}\": (mock) the claim appears consistent."),
+        })
+        .collect();
+    Ok(CrossVerify {
+        reports,
+        summary: format!(
+            "{} providers broadly agree (mock synthesis).",
+            providers.len()
+        ),
+    })
+}
+
+#[tauri::command]
+pub fn assign_team_task(
+    state: State<Db>,
+    team_id: String,
+    task: String,
+) -> Result<TeamRun, String> {
+    let team = state
+        .get_team(&team_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("team not found")?;
+    let steps = team
+        .members
+        .iter()
+        .map(|m| RunStep {
+            member_role: m.role.clone(),
+            detail: format!("{} handled part of: {task}", m.role),
+            status: "done".into(),
+        })
+        .collect();
+    Ok(TeamRun {
+        team_id,
+        task,
+        steps,
+        result: "Synthesized result from the team (mock).".into(),
+    })
 }
