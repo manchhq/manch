@@ -21,4 +21,6 @@ export { PerformancePanel } from "./stage/PerformancePanel";
 export { SettingsForm } from "./stage/SettingsForm";
 export { WorkspaceSwitcher } from "./stage/WorkspaceSwitcher";
 export type { WorkspaceOption, WorkspaceSwitcherProps } from "./stage/WorkspaceSwitcher";
+export { ThemePicker } from "./settings/ThemePicker";
+export type { ThemePickerProps } from "./settings/ThemePicker";
 export * from "./types";
