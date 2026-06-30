@@ -2,7 +2,9 @@
 
 use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
-use manch_dto::{CreateTeam, CreateWorkspace, RunStep, Team, TeamRun, Workspace};
+use manch_dto::{
+    CreateSchedule, CreateTeam, CreateWorkspace, RunStep, Schedule, Team, TeamRun, Workspace,
+};
 use tauri::State;
 
 #[tauri::command]
@@ -89,6 +91,18 @@ pub fn get_team(state: State<Db>, id: String) -> Result<Team, String> {
         .get_team(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "team not found".into())
+}
+
+#[tauri::command]
+pub fn list_schedules(state: State<Db>, workspace_id: String) -> Result<Vec<Schedule>, String> {
+    state
+        .list_schedules(&workspace_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_schedule(state: State<Db>, input: CreateSchedule) -> Result<Schedule, String> {
+    state.create_schedule(input).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

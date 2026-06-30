@@ -79,6 +79,16 @@ impl Db {
              )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schedules (
+                 id           TEXT PRIMARY KEY,
+                 workspace_id TEXT NOT NULL,
+                 target       TEXT NOT NULL,
+                 cadence      TEXT NOT NULL,
+                 next_run     TEXT NOT NULL
+             )",
+            [],
+        )?;
         Ok(())
     }
 
@@ -236,6 +246,42 @@ impl Db {
         )
         .optional()
     }
+
+    pub fn create_schedule(
+        &self,
+        input: manch_dto::CreateSchedule,
+    ) -> rusqlite::Result<manch_dto::Schedule> {
+        let id = new_id("sch_");
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO schedules (id, workspace_id, target, cadence, next_run) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, input.workspace_id, input.target, input.cadence, input.next_run],
+        )?;
+        Ok(manch_dto::Schedule {
+            id,
+            workspace_id: input.workspace_id,
+            target: input.target,
+            cadence: input.cadence,
+            next_run: input.next_run,
+        })
+    }
+
+    pub fn list_schedules(&self, workspace_id: &str) -> rusqlite::Result<Vec<manch_dto::Schedule>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, target, cadence, next_run FROM schedules WHERE workspace_id = ?1 ORDER BY next_run",
+        )?;
+        let rows = stmt.query_map([workspace_id], |r| {
+            Ok(manch_dto::Schedule {
+                id: r.get(0)?,
+                workspace_id: r.get(1)?,
+                target: r.get(2)?,
+                cadence: r.get(3)?,
+                next_run: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]
@@ -295,6 +341,22 @@ mod tests {
         db.save_key("gemini", "g").unwrap();
         db.save_key("anthropic", "a").unwrap();
         assert_eq!(db.list_providers().unwrap(), vec!["anthropic", "gemini"]);
+    }
+
+    #[test]
+    fn schedule_crud_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        let ws = db.create_workspace("w", "").unwrap();
+        let s = db
+            .create_schedule(manch_dto::CreateSchedule {
+                workspace_id: ws.id.clone(),
+                target: "Discovery team".into(),
+                cadence: "daily".into(),
+                next_run: "2026-07-01T09:00:00Z".into(),
+            })
+            .unwrap();
+        assert_eq!(s.cadence, "daily");
+        assert_eq!(db.list_schedules(&ws.id).unwrap().len(), 1);
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub fn run() {
             commands::create_team,
             commands::get_team,
             commands::assign_team_task,
+            commands::list_schedules,
+            commands::create_schedule,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
