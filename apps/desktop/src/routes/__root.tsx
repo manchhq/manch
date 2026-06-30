@@ -5,7 +5,7 @@ import "../styles.css";
 export const Route = createRootRoute({
   component: () => (
     <JotaiProvider>
-      <div data-theme="manch-stage" className="h-screen w-screen overflow-hidden bg-base-300 text-base-content">
+      <div className="h-screen w-screen overflow-hidden bg-base-300 text-base-content">
         <Outlet />
       </div>
     </JotaiProvider>
