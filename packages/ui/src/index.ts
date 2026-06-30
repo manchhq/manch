@@ -29,4 +29,8 @@ export { WorkspaceSettings } from "./settings/WorkspaceSettings";
 export type { WorkspaceSettingsProps } from "./settings/WorkspaceSettings";
 export { SettingsView } from "./settings/SettingsView";
 export type { SettingsViewProps } from "./settings/SettingsView";
+export { TeamCard } from "./teams/TeamCard";
+export type { TeamCardProps, TeamSummary } from "./teams/TeamCard";
+export { TeamList } from "./teams/TeamList";
+export type { TeamListProps } from "./teams/TeamList";
 export * from "./types";
