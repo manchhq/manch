@@ -15,6 +15,7 @@ import { Route as SearchRouteImport } from './routes/search'
 import { Route as ScheduleRouteImport } from './routes/schedule'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as TeamsTeamIdRouteImport } from './routes/teams.$teamId'
 
 const TeamsRoute = TeamsRouteImport.update({
   id: '/teams',
@@ -46,6 +47,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TeamsTeamIdRoute = TeamsTeamIdRouteImport.update({
+  id: '/$teamId',
+  path: '/$teamId',
+  getParentRoute: () => TeamsRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -53,7 +59,8 @@ export interface FileRoutesByFullPath {
   '/schedule': typeof ScheduleRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
-  '/teams': typeof TeamsRoute
+  '/teams': typeof TeamsRouteWithChildren
+  '/teams/$teamId': typeof TeamsTeamIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -61,7 +68,8 @@ export interface FileRoutesByTo {
   '/schedule': typeof ScheduleRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
-  '/teams': typeof TeamsRoute
+  '/teams': typeof TeamsRouteWithChildren
+  '/teams/$teamId': typeof TeamsTeamIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -70,13 +78,28 @@ export interface FileRoutesById {
   '/schedule': typeof ScheduleRoute
   '/search': typeof SearchRoute
   '/settings': typeof SettingsRoute
-  '/teams': typeof TeamsRoute
+  '/teams': typeof TeamsRouteWithChildren
+  '/teams/$teamId': typeof TeamsTeamIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/chat' | '/schedule' | '/search' | '/settings' | '/teams'
+  fullPaths:
+    | '/'
+    | '/chat'
+    | '/schedule'
+    | '/search'
+    | '/settings'
+    | '/teams'
+    | '/teams/$teamId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/chat' | '/schedule' | '/search' | '/settings' | '/teams'
+  to:
+    | '/'
+    | '/chat'
+    | '/schedule'
+    | '/search'
+    | '/settings'
+    | '/teams'
+    | '/teams/$teamId'
   id:
     | '__root__'
     | '/'
@@ -85,6 +108,7 @@ export interface FileRouteTypes {
     | '/search'
     | '/settings'
     | '/teams'
+    | '/teams/$teamId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -93,7 +117,7 @@ export interface RootRouteChildren {
   ScheduleRoute: typeof ScheduleRoute
   SearchRoute: typeof SearchRoute
   SettingsRoute: typeof SettingsRoute
-  TeamsRoute: typeof TeamsRoute
+  TeamsRoute: typeof TeamsRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -140,8 +164,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/teams/$teamId': {
+      id: '/teams/$teamId'
+      path: '/$teamId'
+      fullPath: '/teams/$teamId'
+      preLoaderRoute: typeof TeamsTeamIdRouteImport
+      parentRoute: typeof TeamsRoute
+    }
   }
 }
+
+interface TeamsRouteChildren {
+  TeamsTeamIdRoute: typeof TeamsTeamIdRoute
+}
+
+const TeamsRouteChildren: TeamsRouteChildren = {
+  TeamsTeamIdRoute: TeamsTeamIdRoute,
+}
+
+const TeamsRouteWithChildren = TeamsRoute._addFileChildren(TeamsRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -149,7 +190,7 @@ const rootRouteChildren: RootRouteChildren = {
   ScheduleRoute: ScheduleRoute,
   SearchRoute: SearchRoute,
   SettingsRoute: SettingsRoute,
-  TeamsRoute: TeamsRoute,
+  TeamsRoute: TeamsRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

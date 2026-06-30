@@ -49,6 +49,14 @@ export function useCreateTeam() {
     onSuccess: (_d, input) => qc.invalidateQueries({ queryKey: ["teams", input.workspace_id] }),
   });
 }
+export function useTeam(id: string | null) {
+  return useQuery({ queryKey: ["team", id], queryFn: () => api.getTeam(id!), enabled: !!id });
+}
+export function useAssignTeamTask() {
+  return useMutation({
+    mutationFn: ({ teamId, task }: { teamId: string; task: string }) => api.assignTeamTask(teamId, task),
+  });
+}
 
 export function useSchedules(workspaceId: string | null) {
   return useQuery({ queryKey: ["schedules", workspaceId], queryFn: () => api.listSchedules(workspaceId!), enabled: !!workspaceId });
