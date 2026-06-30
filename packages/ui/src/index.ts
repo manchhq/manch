@@ -19,4 +19,6 @@ export { StageHeader } from "./stage/StageHeader";
 export { GreenRoomView } from "./stage/GreenRoomView";
 export { PerformancePanel } from "./stage/PerformancePanel";
 export { SettingsForm } from "./stage/SettingsForm";
+export { WorkspaceSwitcher } from "./stage/WorkspaceSwitcher";
+export type { WorkspaceOption, WorkspaceSwitcherProps } from "./stage/WorkspaceSwitcher";
 export * from "./types";
