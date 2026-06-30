@@ -266,6 +266,42 @@ impl Db {
         })
     }
 
+    pub fn search(
+        &self,
+        workspace_id: &str,
+        query: &str,
+        kinds: &[String],
+    ) -> rusqlite::Result<Vec<manch_dto::SearchHit>> {
+        let q = query.to_lowercase();
+        let mut hits = Vec::new();
+        let want = |k: &str| kinds.is_empty() || kinds.iter().any(|x| x == k);
+        if want("team") {
+            for t in self.list_teams(workspace_id)? {
+                if t.name.to_lowercase().contains(&q) || t.problem.to_lowercase().contains(&q) {
+                    hits.push(manch_dto::SearchHit {
+                        kind: "team".into(),
+                        id: t.id,
+                        title: t.name,
+                        snippet: t.problem,
+                    });
+                }
+            }
+        }
+        if want("schedule") {
+            for s in self.list_schedules(workspace_id)? {
+                if s.target.to_lowercase().contains(&q) {
+                    hits.push(manch_dto::SearchHit {
+                        kind: "schedule".into(),
+                        id: s.id,
+                        title: s.target,
+                        snippet: s.cadence,
+                    });
+                }
+            }
+        }
+        Ok(hits)
+    }
+
     pub fn list_schedules(&self, workspace_id: &str) -> rusqlite::Result<Vec<manch_dto::Schedule>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -357,6 +393,31 @@ mod tests {
             .unwrap();
         assert_eq!(s.cadence, "daily");
         assert_eq!(db.list_schedules(&ws.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_finds_team_by_name_substring() {
+        let db = Db::open_in_memory().unwrap();
+        let ws = db.create_workspace("w", "").unwrap();
+        let _team = db
+            .create_team(manch_dto::CreateTeam {
+                workspace_id: ws.id.clone(),
+                name: "Discovery team".into(),
+                problem: "find legal precedent".into(),
+                auto: false,
+                members: vec![],
+            })
+            .unwrap();
+        // "scovery" is a substring of "Discovery team" (case-insensitive)
+        let hits = db.search(&ws.id, "scovery", &[]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, "team");
+        assert_eq!(hits[0].title, "Discovery team");
+        // filter by kind="schedule" must return nothing
+        let schedule_hits = db
+            .search(&ws.id, "scovery", &["schedule".to_string()])
+            .unwrap();
+        assert!(schedule_hits.is_empty());
     }
 
     #[test]

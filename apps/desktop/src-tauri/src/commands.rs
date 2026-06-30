@@ -3,7 +3,8 @@
 use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
 use manch_dto::{
-    CreateSchedule, CreateTeam, CreateWorkspace, RunStep, Schedule, Team, TeamRun, Workspace,
+    CreateSchedule, CreateTeam, CreateWorkspace, CrossVerify, Report, RunStep, Schedule, SearchHit,
+    Team, TeamRun, Workspace,
 };
 use tauri::State;
 
@@ -103,6 +104,39 @@ pub fn list_schedules(state: State<Db>, workspace_id: String) -> Result<Vec<Sche
 #[tauri::command]
 pub fn create_schedule(state: State<Db>, input: CreateSchedule) -> Result<Schedule, String> {
     state.create_schedule(input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn search(
+    state: State<Db>,
+    workspace_id: String,
+    query: String,
+    kinds: Vec<String>,
+) -> Result<Vec<SearchHit>, String> {
+    state
+        .search(&workspace_id, &query, &kinds)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cross_verify(providers: Vec<String>, text: String) -> Result<CrossVerify, String> {
+    if providers.is_empty() {
+        return Err("select at least one provider".into());
+    }
+    let reports = providers
+        .iter()
+        .map(|p| Report {
+            provider: p.clone(),
+            text: format!("**{p}** analysis of \"{text}\": (mock) the claim appears consistent."),
+        })
+        .collect();
+    Ok(CrossVerify {
+        reports,
+        summary: format!(
+            "{} providers broadly agree (mock synthesis).",
+            providers.len()
+        ),
+    })
 }
 
 #[tauri::command]

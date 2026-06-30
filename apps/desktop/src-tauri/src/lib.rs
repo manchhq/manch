@@ -31,6 +31,8 @@ pub fn run() {
             commands::assign_team_task,
             commands::list_schedules,
             commands::create_schedule,
+            commands::search,
+            commands::cross_verify,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
