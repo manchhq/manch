@@ -87,7 +87,6 @@ impl Db {
         })
     }
 
-    #[allow(dead_code)] // will be wired to a Tauri command in a follow-up task
     pub fn rename_workspace(&self, id: &str, name: &str) -> rusqlite::Result<manch_dto::Workspace> {
         let conn = self.0.lock().unwrap();
         conn.execute(
@@ -107,7 +106,6 @@ impl Db {
         )
     }
 
-    #[allow(dead_code)] // will be wired to a Tauri command in a follow-up task
     pub fn delete_workspace(&self, id: &str) -> rusqlite::Result<()> {
         let conn = self.0.lock().unwrap();
         conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;

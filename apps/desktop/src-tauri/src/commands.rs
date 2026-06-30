@@ -2,6 +2,7 @@
 
 use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
+use manch_dto::{CreateWorkspace, Workspace};
 use tauri::State;
 
 #[tauri::command]
@@ -46,4 +47,28 @@ pub async fn send_prompt(
         }
     };
     agent.ask(&text).await
+}
+
+#[tauri::command]
+pub fn list_workspaces(state: State<Db>) -> Result<Vec<Workspace>, String> {
+    state.list_workspaces().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_workspace(state: State<Db>, input: CreateWorkspace) -> Result<Workspace, String> {
+    state
+        .create_workspace(&input.name, &input.description)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_workspace(state: State<Db>, id: String, name: String) -> Result<Workspace, String> {
+    state
+        .rename_workspace(&id, &name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_workspace(state: State<Db>, id: String) -> Result<(), String> {
+    state.delete_workspace(&id).map_err(|e| e.to_string())
 }
