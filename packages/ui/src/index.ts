@@ -3,6 +3,8 @@ export type { ButtonProps, ButtonVariant } from "./Button";
 export { VersionBadge } from "./VersionBadge";
 export type { VersionBadgeProps } from "./VersionBadge";
 export { StatusDot } from "./primitives/StatusDot";
+export { EmptyState } from "./primitives/EmptyState";
+export type { EmptyStateProps } from "./primitives/EmptyState";
 export { Badge } from "./primitives/Badge";
 export { Panel } from "./primitives/Panel";
 export { IconRail } from "./primitives/IconRail";
