@@ -23,4 +23,6 @@ export { WorkspaceSwitcher } from "./stage/WorkspaceSwitcher";
 export type { WorkspaceOption, WorkspaceSwitcherProps } from "./stage/WorkspaceSwitcher";
 export { ThemePicker } from "./settings/ThemePicker";
 export type { ThemePickerProps } from "./settings/ThemePicker";
+export { ProviderSettings } from "./settings/ProviderSettings";
+export type { ProviderSettingsProps } from "./settings/ProviderSettings";
 export * from "./types";
