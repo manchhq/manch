@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 
 // Mock the engine so single-provider path is instant (avoids 300 ms sleep delays)
 vi.mock("../engine/mockEngine", () => ({
@@ -61,7 +62,9 @@ describe("Stage", () => {
             ],
             summary: "agree",
           })
-        : Promise.resolve([]),
+        : cmd === "list_configured_providers"
+          ? Promise.resolve(["anthropic"])
+          : Promise.resolve([]),
     );
 
     render(wrap(<Stage />, store));
@@ -82,7 +85,9 @@ describe("Stage", () => {
     const store = makeStore();
     // compareProvidersAtom is empty — compare mode NOT active
 
-    invoke.mockImplementation(() => Promise.resolve([]));
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "list_configured_providers" ? Promise.resolve(["anthropic"]) : Promise.resolve([]),
+    );
 
     render(wrap(<Stage />, store));
 
@@ -101,5 +106,26 @@ describe("Stage", () => {
 
     // CompareView still absent; normal transcript area is rendered
     expect(screen.queryByText(/cross-verification/i)).toBeNull();
+  });
+
+  it("disables send and nudges to Settings when no provider is configured", async () => {
+    const store = makeStore();
+    // list_configured_providers → empty list (no AI configured)
+    invoke.mockResolvedValue([]);
+
+    render(wrap(<Stage />, store));
+
+    // Wait for the query to settle
+    await waitFor(() =>
+      expect(screen.getByText(/no ai provider/i)).toBeTruthy(),
+    );
+
+    // Send button must be disabled
+    const sendBtn = screen.getByRole("button", { name: /send/i });
+    expect((sendBtn as HTMLButtonElement).disabled).toBe(true);
+
+    // A link/button to settings must be present
+    const settingsLink = screen.getByRole("button", { name: /configure/i });
+    expect(settingsLink).toBeTruthy();
   });
 });

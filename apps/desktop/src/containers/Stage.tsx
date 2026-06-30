@@ -1,5 +1,6 @@
 import { useAtomValue, useAtom } from "jotai";
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { StageHeader, Transcript, Composer, CompareView } from "@manch/ui";
 import { ALL_PROVIDERS } from "../lib/providers";
 import {
@@ -10,7 +11,7 @@ import {
   streamingTextAtom,
 } from "../store/atoms";
 import { useSend } from "../data/useSend";
-import { useCrossVerify } from "../data/queries";
+import { useCrossVerify, useConfiguredProviders } from "../data/queries";
 import { mockEngine } from "../engine/mockEngine";
 
 export default function Stage() {
@@ -23,8 +24,12 @@ export default function Stage() {
   const [input, setInput] = useState("");
   const [compareProviders, setCompareProviders] = useAtom(compareProvidersAtom);
   const crossVerify = useCrossVerify();
+  const configured = useConfiguredProviders();
+  const navigate = useNavigate();
 
   const isCompareMode = compareProviders.length > 1;
+  // Only gate after the query has settled — undefined means still loading (don't block)
+  const noProviders = configured.data !== undefined && configured.data.length === 0;
 
   if (!convo) {
     return (
@@ -77,11 +82,24 @@ export default function Stage() {
           />
         )}
       </div>
+      {noProviders && (
+        <div role="alert" className="alert alert-warning mx-4 mb-2 flex items-center gap-2 text-sm">
+          <span>No AI provider configured.</span>
+          <button
+            type="button"
+            className="btn btn-sm btn-outline"
+            onClick={() => navigate({ to: "/settings" })}
+          >
+            Configure a provider
+          </button>
+        </div>
+      )}
       <Composer
         value={input}
-        busy={isCompareMode ? crossVerify.isPending : busy}
+        busy={noProviders || (isCompareMode ? crossVerify.isPending : busy)}
         onChange={setInput}
         onSend={() => {
+          if (noProviders) return;
           if (isCompareMode) {
             crossVerify.mutate({ providers: compareProviders, text: input });
           } else {
