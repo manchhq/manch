@@ -41,4 +41,8 @@ export { ScheduleList } from "./schedule/ScheduleList";
 export type { ScheduleItemView, ScheduleListProps } from "./schedule/ScheduleList";
 export { ScheduleForm } from "./schedule/ScheduleForm";
 export type { ScheduleFormValue, ScheduleFormProps } from "./schedule/ScheduleForm";
+export { SearchBar } from "./search/SearchBar";
+export type { SearchBarProps } from "./search/SearchBar";
+export { SearchResults } from "./search/SearchResults";
+export type { SearchResultView, SearchResultsProps } from "./search/SearchResults";
 export * from "./types";
