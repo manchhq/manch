@@ -35,4 +35,6 @@ export { TeamList } from "./teams/TeamList";
 export type { TeamListProps } from "./teams/TeamList";
 export { TeamComposer } from "./teams/TeamComposer";
 export type { TeamComposerProps, TeamComposerValue, ComposerMember } from "./teams/TeamComposer";
+export { TeamDetail } from "./teams/TeamDetail";
+export type { TeamDetailProps, DetailMember, DetailRunStep, TeamRunView } from "./teams/TeamDetail";
 export * from "./types";
