@@ -2,7 +2,7 @@ import { useAtomValue, useAtom, useSetAtom } from "jotai";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { StageHeader, Transcript, Composer, CompareView, EmptyState } from "@manch/ui";
-import { ALL_PROVIDERS } from "../lib/providers";
+import { ALL_PROVIDERS, type Provider } from "../lib/providers";
 import {
   activeConversationAtom,
   agentStatusAtom,
@@ -35,6 +35,10 @@ export default function Stage() {
   const isCompareMode = compareProviders.length > 1;
   // Only gate after the query has settled — undefined means still loading (don't block)
   const noProviders = configured.data !== undefined && configured.data.length === 0;
+  // Compare only offers configured AIs (spec: multi-select of configured providers).
+  const compareOptions = ALL_PROVIDERS.filter((p) =>
+    (configured.data ?? []).includes(p.id as Provider),
+  );
 
   if (!convo) {
     return (
@@ -65,7 +69,7 @@ export default function Stage() {
       {/* Compare provider multi-select (inline control — purely additive, gated on length > 1) */}
       <div className="flex flex-wrap items-center gap-3 border-b border-base-300 px-4 py-2 text-sm">
         <span className="font-medium text-base-content/60">Compare:</span>
-        {ALL_PROVIDERS.map((p) => (
+        {compareOptions.map((p) => (
           <label key={p.id} className="flex cursor-pointer items-center gap-1">
             <input
               type="checkbox"

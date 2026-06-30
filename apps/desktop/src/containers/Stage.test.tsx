@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createStore, Provider as JotaiProvider } from "jotai";
@@ -106,6 +106,25 @@ describe("Stage", () => {
 
     // CompareView still absent; normal transcript area is rendered
     expect(screen.queryByText(/cross-verification/i)).toBeNull();
+  });
+
+  it("offers only configured providers in the compare multi-select", async () => {
+    const store = makeStore();
+    // Only anthropic is configured.
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "list_configured_providers" ? Promise.resolve(["anthropic"]) : Promise.resolve([]),
+    );
+
+    render(wrap(<Stage />, store));
+
+    // Wait for the configured-providers query to settle, then scope to the compare row
+    // (not the StageHeader provider <select>, which lists all providers).
+    await waitFor(() => {
+      const row = screen.getByText("Compare:").closest("div") as HTMLElement;
+      // The configured provider's checkbox appears; the unconfigured one does not.
+      expect(within(row).getByLabelText("Anthropic (Claude · BYOK)")).toBeTruthy();
+      expect(within(row).queryByLabelText("Claude Code (ACP)")).toBeNull();
+    });
   });
 
   it("disables send and nudges to Settings when no provider is configured", async () => {
