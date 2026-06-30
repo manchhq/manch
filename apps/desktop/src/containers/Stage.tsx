@@ -1,7 +1,7 @@
-import { useAtomValue, useAtom } from "jotai";
+import { useAtomValue, useAtom, useSetAtom } from "jotai";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { StageHeader, Transcript, Composer, CompareView } from "@manch/ui";
+import { StageHeader, Transcript, Composer, CompareView, EmptyState } from "@manch/ui";
 import { ALL_PROVIDERS } from "../lib/providers";
 import {
   activeConversationAtom,
@@ -9,6 +9,9 @@ import {
   compareProvidersAtom,
   isStreamingAtom,
   streamingTextAtom,
+  conversationsAtom,
+  activeIdAtom,
+  newConversation,
 } from "../store/atoms";
 import { useSend } from "../data/useSend";
 import { useCrossVerify, useConfiguredProviders } from "../data/queries";
@@ -26,6 +29,8 @@ export default function Stage() {
   const crossVerify = useCrossVerify();
   const configured = useConfiguredProviders();
   const navigate = useNavigate();
+  const setConversations = useSetAtom(conversationsAtom);
+  const setActiveId = useSetAtom(activeIdAtom);
 
   const isCompareMode = compareProviders.length > 1;
   // Only gate after the query has settled — undefined means still loading (don't block)
@@ -33,9 +38,19 @@ export default function Stage() {
 
   if (!convo) {
     return (
-      <div className="flex h-full items-center justify-center text-base-content/50">
-        Select or start a conversation.
-      </div>
+      <EmptyState
+        glyph="💬"
+        title="No conversation yet"
+        description="Start a new conversation to get going."
+        action={{
+          label: "New conversation",
+          onClick: () => {
+            const c = newConversation();
+            setConversations((cs) => [c, ...cs]);
+            setActiveId(c.id);
+          },
+        }}
+      />
     );
   }
 

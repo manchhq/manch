@@ -128,4 +128,31 @@ describe("Stage", () => {
     const settingsLink = screen.getByRole("button", { name: /configure/i });
     expect(settingsLink).toBeTruthy();
   });
+
+  it("shows an inviting empty state when there are no conversations and clicking 'New conversation' creates one", async () => {
+    // Empty store — no conversations, no active id
+    const store = createStore();
+
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "list_configured_providers" ? Promise.resolve(["anthropic"]) : Promise.resolve([]),
+    );
+
+    render(wrap(<Stage />, store));
+
+    // Empty state heading must be visible
+    expect(screen.getByText("No conversation yet")).toBeTruthy();
+
+    // Action button must be present
+    const newBtn = screen.getByRole("button", { name: /new conversation/i });
+    expect(newBtn).toBeTruthy();
+
+    // Clicking the button should create a conversation and switch to the main view
+    await userEvent.click(newBtn);
+
+    // After creation the empty state disappears and the composer is shown
+    await waitFor(() =>
+      expect(screen.queryByText("No conversation yet")).toBeNull(),
+    );
+    expect(screen.getByPlaceholderText("Message…")).toBeTruthy();
+  });
 });
