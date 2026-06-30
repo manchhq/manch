@@ -5,13 +5,12 @@ const preview: Preview = {
   parameters: {
     controls: { matchers: { color: /(background|color)$/i, date: /Date$/i } },
     backgrounds: {
-      default: "stage",
-      values: [{ name: "stage", value: "#1a1320" }],
+      default: "dark",
     },
   },
   decorators: [
     (Story) => {
-      document.documentElement.setAttribute("data-theme", "manch-stage");
+      document.documentElement.setAttribute("data-theme", "dark");
       return Story();
     },
   ],
