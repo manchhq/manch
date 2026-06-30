@@ -27,4 +27,6 @@ export { ProviderSettings } from "./settings/ProviderSettings";
 export type { ProviderSettingsProps } from "./settings/ProviderSettings";
 export { WorkspaceSettings } from "./settings/WorkspaceSettings";
 export type { WorkspaceSettingsProps } from "./settings/WorkspaceSettings";
+export { SettingsView } from "./settings/SettingsView";
+export type { SettingsViewProps } from "./settings/SettingsView";
 export * from "./types";
