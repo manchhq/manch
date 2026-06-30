@@ -3,6 +3,19 @@
 
 use rusqlite::{Connection, OptionalExtension};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn new_id(prefix: &str) -> String {
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}{t:x}{n:x}")
+}
 
 /// Owns the SQLite connection behind a mutex so it can live in Tauri state.
 pub struct Db(Mutex<Connection>);
@@ -31,6 +44,80 @@ impl Db {
              )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS workspaces (
+                 id          TEXT PRIMARY KEY,
+                 name        TEXT NOT NULL,
+                 description TEXT NOT NULL DEFAULT ''
+             )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_workspaces(&self) -> rusqlite::Result<Vec<manch_dto::Workspace>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, name, description FROM workspaces ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(manch_dto::Workspace {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn create_workspace(
+        &self,
+        name: &str,
+        description: &str,
+    ) -> rusqlite::Result<manch_dto::Workspace> {
+        let id = new_id("ws_");
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, name, description) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, name, description],
+        )?;
+        Ok(manch_dto::Workspace {
+            id,
+            name: name.into(),
+            description: description.into(),
+        })
+    }
+
+    #[allow(dead_code)] // will be wired to a Tauri command in a follow-up task
+    pub fn rename_workspace(&self, id: &str, name: &str) -> rusqlite::Result<manch_dto::Workspace> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE workspaces SET name = ?2 WHERE id = ?1",
+            rusqlite::params![id, name],
+        )?;
+        conn.query_row(
+            "SELECT id, name, description FROM workspaces WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(manch_dto::Workspace {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                })
+            },
+        )
+    }
+
+    #[allow(dead_code)] // will be wired to a Tauri command in a follow-up task
+    pub fn delete_workspace(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn seed_defaults(&self) -> rusqlite::Result<()> {
+        if self.list_workspaces()?.is_empty() {
+            self.create_workspace("My workspace", "Default workspace")?;
+        }
         Ok(())
     }
 
@@ -68,6 +155,29 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_crud_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.list_workspaces().unwrap().is_empty());
+        let w = db.create_workspace("Legal", "case work").unwrap();
+        assert_eq!(w.name, "Legal");
+        let all = db.list_workspaces().unwrap();
+        assert_eq!(all.len(), 1);
+        let renamed = db.rename_workspace(&w.id, "Legal research").unwrap();
+        assert_eq!(renamed.name, "Legal research");
+        db.delete_workspace(&w.id).unwrap();
+        assert!(db.list_workspaces().unwrap().is_empty());
+    }
+
+    #[test]
+    fn seed_inserts_one_default_workspace_only_when_empty() {
+        let db = Db::open_in_memory().unwrap();
+        db.seed_defaults().unwrap();
+        assert_eq!(db.list_workspaces().unwrap().len(), 1);
+        db.seed_defaults().unwrap(); // idempotent
+        assert_eq!(db.list_workspaces().unwrap().len(), 1);
+    }
 
     #[test]
     fn save_then_get_roundtrips() {

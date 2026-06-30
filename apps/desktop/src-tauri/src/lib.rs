@@ -13,6 +13,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("manch.sqlite3");
             let db = Db::open(db_path.to_str().expect("utf-8 db path")).expect("open database");
+            db.seed_defaults().expect("seed defaults");
             app.manage(db);
             Ok(())
         })
