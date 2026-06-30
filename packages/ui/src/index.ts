@@ -7,6 +7,8 @@ export { Badge } from "./primitives/Badge";
 export { Panel } from "./primitives/Panel";
 export { IconRail } from "./primitives/IconRail";
 export { Spotlight } from "./primitives/Spotlight";
+export { NavRail } from "./primitives/NavRail";
+export type { NavItem, NavRailProps } from "./primitives/NavRail";
 export { Message } from "./stage/Message";
 export { ToolCallCard } from "./stage/ToolCallCard";
 export { Transcript } from "./stage/Transcript";
