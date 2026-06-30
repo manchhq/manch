@@ -1,14 +1,16 @@
-import { useAtomValue } from "jotai";
+import { useAtomValue, useAtom } from "jotai";
 import { useState } from "react";
-import { StageHeader, Transcript, Composer } from "@manch/ui";
+import { StageHeader, Transcript, Composer, CompareView } from "@manch/ui";
 import { ALL_PROVIDERS } from "../lib/providers";
 import {
   activeConversationAtom,
   agentStatusAtom,
+  compareProvidersAtom,
   isStreamingAtom,
   streamingTextAtom,
 } from "../store/atoms";
 import { useSend } from "../data/useSend";
+import { useCrossVerify } from "../data/queries";
 import { mockEngine } from "../engine/mockEngine";
 
 export default function Stage() {
@@ -19,6 +21,10 @@ export default function Stage() {
   const { send, busy } = useSend(mockEngine);
   const [provider, setProvider] = useState(ALL_PROVIDERS[0].id);
   const [input, setInput] = useState("");
+  const [compareProviders, setCompareProviders] = useAtom(compareProvidersAtom);
+  const crossVerify = useCrossVerify();
+
+  const isCompareMode = compareProviders.length > 1;
 
   if (!convo) {
     return (
@@ -36,19 +42,51 @@ export default function Stage() {
         onProviderChange={setProvider}
         status={status}
       />
+      {/* Compare provider multi-select (inline control — purely additive, gated on length > 1) */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-base-300 px-4 py-2 text-sm">
+        <span className="font-medium text-base-content/60">Compare:</span>
+        {ALL_PROVIDERS.map((p) => (
+          <label key={p.id} className="flex cursor-pointer items-center gap-1">
+            <input
+              type="checkbox"
+              className="checkbox checkbox-xs"
+              checked={compareProviders.includes(p.id)}
+              onChange={(e) => {
+                if (e.target.checked) {
+                  setCompareProviders([...compareProviders, p.id]);
+                } else {
+                  setCompareProviders(compareProviders.filter((id) => id !== p.id));
+                }
+              }}
+            />
+            {p.label}
+          </label>
+        ))}
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <Transcript
-          messages={convo.messages}
-          isStreaming={isStreaming}
-          streamingText={streamingText}
-        />
+        {isCompareMode && crossVerify.data ? (
+          <CompareView
+            reports={crossVerify.data.reports}
+            summary={crossVerify.data.summary}
+          />
+        ) : (
+          <Transcript
+            messages={convo.messages}
+            isStreaming={isStreaming}
+            streamingText={streamingText}
+          />
+        )}
       </div>
       <Composer
         value={input}
-        busy={busy}
+        busy={isCompareMode ? crossVerify.isPending : busy}
         onChange={setInput}
         onSend={() => {
-          send(provider, input);
+          if (isCompareMode) {
+            crossVerify.mutate({ providers: compareProviders, text: input });
+          } else {
+            send(provider, input);
+          }
           setInput("");
         }}
       />
