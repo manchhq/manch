@@ -25,6 +25,10 @@ pub fn run() {
             commands::create_workspace,
             commands::rename_workspace,
             commands::delete_workspace,
+            commands::list_teams,
+            commands::create_team,
+            commands::get_team,
+            commands::assign_team_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

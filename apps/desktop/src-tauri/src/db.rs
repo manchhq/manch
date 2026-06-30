@@ -17,6 +17,22 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}{t:x}{n:x}")
 }
 
+fn row_to_team(r: &rusqlite::Row<'_>) -> rusqlite::Result<manch_dto::Team> {
+    let members_json: String = r.get(4)?;
+    let caps_json: String = r.get(5)?;
+    let members: Vec<manch_dto::TeamMember> =
+        serde_json::from_str(&members_json).unwrap_or_default();
+    let capabilities: Vec<String> = serde_json::from_str(&caps_json).unwrap_or_default();
+    Ok(manch_dto::Team {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        name: r.get(2)?,
+        problem: r.get(3)?,
+        members,
+        capabilities,
+    })
+}
+
 /// Owns the SQLite connection behind a mutex so it can live in Tauri state.
 pub struct Db(Mutex<Connection>);
 
@@ -49,6 +65,17 @@ impl Db {
                  id          TEXT PRIMARY KEY,
                  name        TEXT NOT NULL,
                  description TEXT NOT NULL DEFAULT ''
+             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS teams (
+                 id           TEXT PRIMARY KEY,
+                 workspace_id TEXT NOT NULL,
+                 name         TEXT NOT NULL,
+                 problem      TEXT NOT NULL DEFAULT '',
+                 members      TEXT NOT NULL DEFAULT '[]',
+                 capabilities TEXT NOT NULL DEFAULT '[]'
              )",
             [],
         )?;
@@ -148,6 +175,67 @@ impl Db {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
+
+    pub fn create_team(&self, input: manch_dto::CreateTeam) -> rusqlite::Result<manch_dto::Team> {
+        let id = new_id("tm_");
+        let members = if input.auto && input.members.is_empty() {
+            vec![
+                manch_dto::TeamMember {
+                    role: "Researcher".into(),
+                    provider: "anthropic".into(),
+                },
+                manch_dto::TeamMember {
+                    role: "Analyst".into(),
+                    provider: "anthropic".into(),
+                },
+                manch_dto::TeamMember {
+                    role: "Critic".into(),
+                    provider: "claude-code".into(),
+                },
+            ]
+        } else {
+            input.members
+        };
+        let capabilities = vec![
+            "read_file".to_string(),
+            "search".to_string(),
+            "write_report".to_string(),
+        ];
+        let members_json = serde_json::to_string(&members).unwrap();
+        let caps_json = serde_json::to_string(&capabilities).unwrap();
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO teams (id, workspace_id, name, problem, members, capabilities) VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![id, input.workspace_id, input.name, input.problem, members_json, caps_json],
+        )?;
+        Ok(manch_dto::Team {
+            id,
+            workspace_id: input.workspace_id,
+            name: input.name,
+            problem: input.problem,
+            members,
+            capabilities,
+        })
+    }
+
+    pub fn list_teams(&self, workspace_id: &str) -> rusqlite::Result<Vec<manch_dto::Team>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, name, problem, members, capabilities FROM teams WHERE workspace_id = ?1 ORDER BY name",
+        )?;
+        let rows = stmt.query_map([workspace_id], row_to_team)?;
+        rows.collect()
+    }
+
+    pub fn get_team(&self, id: &str) -> rusqlite::Result<Option<manch_dto::Team>> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(
+            "SELECT id, workspace_id, name, problem, members, capabilities FROM teams WHERE id = ?1",
+            [id],
+            row_to_team,
+        )
+        .optional()
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +295,26 @@ mod tests {
         db.save_key("gemini", "g").unwrap();
         db.save_key("anthropic", "a").unwrap();
         assert_eq!(db.list_providers().unwrap(), vec!["anthropic", "gemini"]);
+    }
+
+    #[test]
+    fn team_crud_with_members_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        let ws = db.create_workspace("w", "").unwrap();
+        let input = manch_dto::CreateTeam {
+            workspace_id: ws.id.clone(),
+            name: "Discovery".into(),
+            problem: "find precedent".into(),
+            auto: false,
+            members: vec![manch_dto::TeamMember {
+                role: "researcher".into(),
+                provider: "anthropic".into(),
+            }],
+        };
+        let team = db.create_team(input).unwrap();
+        assert_eq!(team.members.len(), 1);
+        let got = db.get_team(&team.id).unwrap().unwrap();
+        assert_eq!(got.name, "Discovery");
+        assert_eq!(db.list_teams(&ws.id).unwrap().len(), 1);
     }
 }

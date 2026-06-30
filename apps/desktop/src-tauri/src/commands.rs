@@ -2,7 +2,7 @@
 
 use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
-use manch_dto::{CreateWorkspace, Workspace};
+use manch_dto::{CreateTeam, CreateWorkspace, RunStep, Team, TeamRun, Workspace};
 use tauri::State;
 
 #[tauri::command]
@@ -71,4 +71,49 @@ pub fn rename_workspace(state: State<Db>, id: String, name: String) -> Result<Wo
 #[tauri::command]
 pub fn delete_workspace(state: State<Db>, id: String) -> Result<(), String> {
     state.delete_workspace(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_teams(state: State<Db>, workspace_id: String) -> Result<Vec<Team>, String> {
+    state.list_teams(&workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_team(state: State<Db>, input: CreateTeam) -> Result<Team, String> {
+    state.create_team(input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_team(state: State<Db>, id: String) -> Result<Team, String> {
+    state
+        .get_team(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "team not found".into())
+}
+
+#[tauri::command]
+pub fn assign_team_task(
+    state: State<Db>,
+    team_id: String,
+    task: String,
+) -> Result<TeamRun, String> {
+    let team = state
+        .get_team(&team_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("team not found")?;
+    let steps = team
+        .members
+        .iter()
+        .map(|m| RunStep {
+            member_role: m.role.clone(),
+            detail: format!("{} handled part of: {task}", m.role),
+            status: "done".into(),
+        })
+        .collect();
+    Ok(TeamRun {
+        team_id,
+        task,
+        steps,
+        result: "Synthesized result from the team (mock).".into(),
+    })
 }
