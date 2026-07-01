@@ -1,2 +1,29 @@
 @import "tailwindcss";
 @plugin "daisyui";
+
+/* --- Motion vocabulary (theater × kathputli). Theme-agnostic: currentColor +
+   semantic tokens only. All guarded by prefers-reduced-motion. --- */
+@keyframes puppet-sway {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
+}
+@keyframes string-tug {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(2px); }
+}
+@keyframes stage-reveal {
+  from { opacity: 0; transform: translateY(6px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-puppet-sway { transform-origin: top center; animation: puppet-sway 2.4s ease-in-out infinite; }
+.animate-string-tug { animation: string-tug 1.6s ease-in-out infinite; }
+.stage-reveal { animation: stage-reveal 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.stage-enter { animation: stage-reveal 220ms ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-puppet-sway,
+  .animate-string-tug,
+  .stage-reveal,
+  .stage-enter { animation: none; }
+}
