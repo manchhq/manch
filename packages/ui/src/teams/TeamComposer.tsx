@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useState } from "react";
 
 export interface ComposerMember {
@@ -17,7 +18,7 @@ export interface TeamComposerProps {
   creating?: boolean;
 }
 
-export function TeamComposer({ providers, onCreate, onConfigureProviders, creating }: TeamComposerProps) {
+export function TeamComposer({ providers, onCreate, onConfigureProviders, creating }: TeamComposerProps): JSX.Element {
   const [auto, setAuto] = useState(true);
   const [name, setName] = useState("");
   const [problem, setProblem] = useState("");

@@ -1,10 +1,11 @@
+import type { JSX } from "react";
 import type { ToolCallData, AgentStatus } from "../types";
 import { StatusDot } from "../primitives/StatusDot";
 import { Badge } from "../primitives/Badge";
 
 const AS: Record<ToolCallData["status"], AgentStatus> = { running: "busy", done: "done", error: "error" };
 
-export function ToolCallCard({ call }: { call: ToolCallData }) {
+export function ToolCallCard({ call }: { call: ToolCallData }): JSX.Element {
   return (
     <div data-testid="toolcall" data-status={call.status}
          className="rounded-field border border-base-300 bg-base-200 px-3 py-2">

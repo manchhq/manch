@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 export type ButtonVariant = "primary" | "secondary" | "ghost";
 
 export interface ButtonProps {
@@ -13,7 +14,7 @@ const variantClass: Record<ButtonVariant, string> = {
   ghost: "btn-ghost",
 };
 
-export function Button({ label, onClick, variant = "primary", disabled = false }: ButtonProps) {
+export function Button({ label, onClick, variant = "primary", disabled = false }: ButtonProps): JSX.Element {
   return (
     <button
       type="button"

@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useState } from "react";
 
 export interface ScheduleFormValue {
@@ -14,7 +15,7 @@ export interface ScheduleFormProps {
 export function ScheduleForm({
   onCreate,
   creating,
-}: ScheduleFormProps) {
+}: ScheduleFormProps): JSX.Element {
   const [target, setTarget] = useState("");
   const [cadence, setCadence] = useState("daily");
   const [nextRun, setNextRun] = useState("");

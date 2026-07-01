@@ -1,8 +1,9 @@
+import type { JSX } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { MessageData } from "../types";
 
-export function Message({ message }: { message: MessageData }) {
+export function Message({ message }: { message: MessageData }): JSX.Element {
   const isUser = message.role === "user";
   return (
     <div

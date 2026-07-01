@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 export interface NavItem {
   id: string;
   label: string;
@@ -10,7 +11,7 @@ export interface NavRailProps {
   onSelect: (id: string) => void;
 }
 
-export function NavRail({ items, activeId, onSelect }: NavRailProps) {
+export function NavRail({ items, activeId, onSelect }: NavRailProps): JSX.Element {
   return (
     <nav role="tablist" aria-orientation="vertical" className="flex h-full flex-col items-center gap-1 bg-base-200 py-3">
       {items.map((item) => {

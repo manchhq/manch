@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { ReactNode } from "react";
 
 export function Panel({
@@ -8,7 +9,7 @@ export function Panel({
   collapsed: boolean;
   onToggle: () => void;
   children: ReactNode;
-}) {
+}): JSX.Element {
   if (collapsed) {
     return (
       <aside className="flex h-full w-10 flex-col items-center border-base-300 bg-base-200 py-3"

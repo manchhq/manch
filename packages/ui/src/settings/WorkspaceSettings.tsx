@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useState } from "react";
 
 export interface WorkspaceSettingsProps {
@@ -6,7 +7,7 @@ export interface WorkspaceSettingsProps {
   onDelete: (id: string) => void;
 }
 
-export function WorkspaceSettings({ workspaces, onRename, onDelete }: WorkspaceSettingsProps) {
+export function WorkspaceSettings({ workspaces, onRename, onDelete }: WorkspaceSettingsProps): JSX.Element {
   return (
     <section className="space-y-3">
       <h3 className="text-sm font-medium text-base-content">Workspaces</h3>

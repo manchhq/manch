@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 export interface ScheduleItemView {
   id: string;
   target: string;
@@ -9,7 +10,7 @@ export interface ScheduleListProps {
   schedules: ScheduleItemView[];
 }
 
-export function ScheduleList({ schedules }: ScheduleListProps) {
+export function ScheduleList({ schedules }: ScheduleListProps): JSX.Element {
   return (
     <ul className="space-y-2">
       {schedules.map((s) => (

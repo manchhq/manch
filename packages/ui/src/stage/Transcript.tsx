@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { MessageData } from "../types";
 import { Message } from "./Message";
 import { Spotlight } from "../primitives/Spotlight";
@@ -8,7 +9,7 @@ export function Transcript({
   messages: MessageData[];
   streamingText?: string;
   isStreaming?: boolean;
-}) {
+}): JSX.Element {
   if (messages.length === 0 && !isStreaming) {
     return (
       <div data-testid="transcript-empty" className="flex h-full items-center justify-center text-center text-base-content/50">

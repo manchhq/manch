@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useForm } from "@tanstack/react-form";
 
 export interface ProviderSettingsProps {
@@ -8,7 +9,7 @@ export interface ProviderSettingsProps {
   saving?: boolean;
 }
 
-export function ProviderSettings({ all, configured, onSave, onRemove, saving }: ProviderSettingsProps) {
+export function ProviderSettings({ all, configured, onSave, onRemove, saving }: ProviderSettingsProps): JSX.Element {
   const form = useForm({
     defaultValues: { provider: all[0]?.id ?? "", apiKey: "" },
     onSubmit: ({ value }) => onSave(value.provider, value.apiKey),
