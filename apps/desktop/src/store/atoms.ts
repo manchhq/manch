@@ -31,7 +31,13 @@ export const activeConversationAtom = atom((get) => {
   return get(conversationsAtom).find((c) => c.id === id) ?? null;
 });
 
-export const THEMES = ["dark", "light", "dracula", "nord", "cupcake"];
+export const THEMES = [
+  "dark", "light", "cupcake", "bumblebee", "emerald", "corporate", "synthwave",
+  "retro", "cyberpunk", "valentine", "halloween", "garden", "forest", "aqua",
+  "lofi", "pastel", "fantasy", "wireframe", "black", "luxury", "dracula", "cmyk",
+  "autumn", "business", "acid", "lemonade", "night", "coffee", "winter", "dim",
+  "nord", "sunset", "caramellatte", "abyss", "silk",
+];
 export const themeAtom = atomWithStorage<string>("manch.theme", "dark");
 export const activeWorkspaceIdAtom = atomWithStorage<string | null>("manch.activeWorkspace", null);
 

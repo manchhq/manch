@@ -1,5 +1,5 @@
 @import "tailwindcss";
 @source "../../../packages/ui/src";
 @plugin "daisyui" {
-  themes: dark --default, light, dracula, nord, cupcake;
+  themes: all;
 }

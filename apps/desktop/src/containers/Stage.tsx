@@ -1,7 +1,7 @@
 import { useAtomValue, useAtom, useSetAtom } from "jotai";
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { StageHeader, Transcript, Composer, CompareView, EmptyState } from "@manch/ui";
+import { StageHeader, Transcript, Composer, CompareView, EmptyState, PuppetLoader } from "@manch/ui";
 import { ALL_PROVIDERS, type Provider } from "../lib/providers";
 import {
   activeConversationAtom,
@@ -110,6 +110,11 @@ export default function Stage() {
           />
         )}
       </div>
+      {isStreaming && (
+        <div className="flex items-center justify-center py-2">
+          <PuppetLoader size={32} label="Streaming…" />
+        </div>
+      )}
       {noProviders && (
         <div role="alert" className="alert alert-warning mx-4 mb-2 flex items-center gap-2 text-sm">
           <span>No AI provider configured.</span>
