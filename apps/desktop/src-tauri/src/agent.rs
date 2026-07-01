@@ -46,7 +46,10 @@ impl Provider {
 /// One interface, two implementations (plan B). Stand-in for `manch_protocol::Agent`.
 #[async_trait]
 pub trait ChatAgent: Send + Sync {
-    async fn ask(&self, prompt: &str) -> Result<String, String>;
+    /// Stream the answer to `prompt`, emitting `Token`/`Tool` events into `sink`
+    /// and finishing with `Done` (or `Error`). Returns `Err` only for failures
+    /// that occur before any event could be emitted.
+    async fn stream(&self, prompt: &str, sink: &dyn EventSink) -> Result<(), String>;
 }
 
 /// Build the Anthropic Messages API request body. Pure.
@@ -54,6 +57,7 @@ fn anthropic_request_body(model: &str, prompt: &str) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
+        "stream": true,
         "messages": [{ "role": "user", "content": prompt }],
     })
 }
@@ -112,7 +116,6 @@ pub fn offerable_providers(mut saved: Vec<String>) -> Vec<String> {
 
 /// A destination for streamed agent events. Production wraps a Tauri `Channel`;
 /// tests use a `Vec` collector. Keeps the agents ignorant of Tauri specifics.
-#[allow(dead_code)] // wired to streaming agents in Tasks 3–4
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: StreamEvent);
 }
@@ -121,7 +124,6 @@ pub trait EventSink: Send + Sync {
 /// (`None` if nothing new). ACP adapters vary — pure deltas, cumulative
 /// snapshots, and a trailing full-message repeat — this tolerates all three so
 /// we never double-emit ("New Delhi.New Delhi."). Pure.
-#[allow(dead_code)] // used by streaming tasks (Tasks 3–4); silence until then
 pub(crate) fn push_chunk(buf: &mut String, chunk: &str) -> Option<String> {
     if chunk.is_empty() {
         None
@@ -143,7 +145,6 @@ pub(crate) fn push_chunk(buf: &mut String, chunk: &str) -> Option<String> {
 
 /// Extract the text of one Anthropic streaming SSE `data:` payload; `None` for
 /// any non-text event (`message_start`, `ping`, `content_block_stop`, …). Pure.
-#[allow(dead_code)] // used by AnthropicAgent streaming in Task 3
 pub(crate) fn parse_sse_delta(data: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(data).ok()?;
     if v.get("type")?.as_str()? != "content_block_delta" {
@@ -157,7 +158,6 @@ pub(crate) fn parse_sse_delta(data: &str) -> Option<String> {
 }
 
 /// Map an ACP tool-call status onto the stage's `running|done|error` vocabulary.
-#[allow(dead_code)] // used by tool-call streaming in Task 4
 pub(crate) fn tool_status(
     status: agent_client_protocol::schema::v1::ToolCallStatus,
 ) -> &'static str {
@@ -166,26 +166,6 @@ pub(crate) fn tool_status(
         ToolCallStatus::Completed => "done",
         ToolCallStatus::Failed => "error",
         _ => "running", // Pending / InProgress / future
-    }
-}
-
-/// Merge one streamed `AgentMessageChunk` into the accumulator. ACP adapters vary:
-/// some send pure deltas, some send cumulative snapshots, and the Claude Code
-/// adapter repeats the full message at the end — naive concatenation doubles the
-/// reply ("New Delhi.New Delhi."). This tolerates all three. Pure.
-fn merge_chunk(buf: &mut String, chunk: &str) {
-    if chunk.is_empty() {
-        // nothing to add
-    } else if buf.is_empty() {
-        buf.push_str(chunk);
-    } else if chunk.starts_with(buf.as_str()) {
-        // cumulative snapshot that supersedes what we have
-        *buf = chunk.to_string();
-    } else if buf.ends_with(chunk) {
-        // exact repeat / trailing duplicate already present — drop it
-    } else {
-        // genuine delta
-        buf.push_str(chunk);
     }
 }
 
@@ -202,7 +182,8 @@ impl AnthropicAgent {
 
 #[async_trait]
 impl ChatAgent for AnthropicAgent {
-    async fn ask(&self, prompt: &str) -> Result<String, String> {
+    async fn stream(&self, prompt: &str, sink: &dyn EventSink) -> Result<(), String> {
+        use futures_util::StreamExt;
         ensure_crypto_provider();
         let resp = reqwest::Client::new()
             .post(ANTHROPIC_URL)
@@ -212,14 +193,38 @@ impl ChatAgent for AnthropicAgent {
             .send()
             .await
             .map_err(|e| e.to_string())?;
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        if !status.is_success() {
-            return Err(parse_anthropic_text(&body)
+
+        // Error responses are JSON, not SSE — surface the message.
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let msg = parse_anthropic_text(&body)
                 .err()
-                .unwrap_or_else(|| format!("anthropic: HTTP {status}")));
+                .unwrap_or_else(|| format!("anthropic: HTTP {status}"));
+            sink.emit(StreamEvent::Error { message: msg });
+            return Ok(());
         }
-        parse_anthropic_text(&body)
+
+        // SSE frames arrive as `\n`-separated lines; buffer partial lines across
+        // network chunks and act only on `data:` payloads.
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.map_err(|e| e.to_string())?;
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(nl) = buf.find('\n') {
+                let line = buf[..nl].trim().to_string();
+                buf.drain(..=nl);
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if let Some(text) = parse_sse_delta(data) {
+                        sink.emit(StreamEvent::Token { text });
+                    }
+                }
+            }
+        }
+        sink.emit(StreamEvent::Done);
+        Ok(())
     }
 }
 
@@ -237,7 +242,8 @@ impl ClaudeCodeAgent {
 
 #[async_trait]
 impl ChatAgent for ClaudeCodeAgent {
-    async fn ask(&self, prompt: &str) -> Result<String, String> {
+    async fn stream(&self, prompt: &str, sink: &dyn EventSink) -> Result<(), String> {
+        use std::collections::HashMap;
         use std::sync::{Arc, Mutex};
 
         use agent_client_protocol::schema::ProtocolVersion;
@@ -248,34 +254,75 @@ impl ChatAgent for ClaudeCodeAgent {
         };
         use agent_client_protocol::{self as acp, AcpAgent, Agent, Client, ConnectionTo};
 
-        // BYOC auth: `from_args` leading `NAME=value` tokens become subprocess env
-        // vars; with `None` no key is injected and Claude Code uses its own login.
         let agent = AcpAgent::from_args(claude_code_args(self.api_key.as_deref()))
             .map_err(|e| e.to_string())?;
         let prompt = prompt.to_string();
 
-        // Assistant text streams in as `AgentMessageChunk` notifications; collect it
-        // in the notification handler (the pattern the crate's own example uses).
+        // Forward events as they arrive. The handler is a `'static` async closure,
+        // so it owns Arc clones. We collect StreamEvents into a queue drained after
+        // the run (the `Client` handler cannot borrow `sink` directly), preserving
+        // arrival order. `buf` dedups token chunks; `names` resolves tool titles
+        // across ToolCallUpdate (which may omit the title).
+        let queue: Arc<Mutex<Vec<StreamEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let q = queue.clone();
         let buf = Arc::new(Mutex::new(String::new()));
-        let sink = buf.clone();
+        let names: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let nb = buf.clone();
+        let nn = names.clone();
 
         let stop = Client
             .builder()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
-                    if let SessionUpdate::AgentMessageChunk(ContentChunk {
-                        content: ContentBlock::Text(text),
-                        ..
-                    }) = n.update
-                    {
-                        eprintln!("[acp] message chunk: {:?}", text.text);
-                        merge_chunk(&mut sink.lock().unwrap(), &text.text);
+                    let mut out: Vec<StreamEvent> = Vec::new();
+                    match n.update {
+                        SessionUpdate::AgentMessageChunk(ContentChunk {
+                            content: ContentBlock::Text(text),
+                            ..
+                        }) => {
+                            if let Some(delta) = push_chunk(&mut nb.lock().unwrap(), &text.text) {
+                                out.push(StreamEvent::Token { text: delta });
+                            }
+                        }
+                        SessionUpdate::ToolCall(tc) => {
+                            let id = tc.tool_call_id.0.to_string();
+                            nn.lock().unwrap().insert(id.clone(), tc.title.clone());
+                            out.push(StreamEvent::Tool {
+                                id,
+                                name: tc.title,
+                                status: tool_status(tc.status).into(),
+                                detail: None,
+                            });
+                        }
+                        SessionUpdate::ToolCallUpdate(u) => {
+                            let id = u.tool_call_id.0.to_string();
+                            let name = u
+                                .fields
+                                .title
+                                .clone()
+                                .or_else(|| nn.lock().unwrap().get(&id).cloned())
+                                .unwrap_or_default();
+                            out.push(StreamEvent::Tool {
+                                id,
+                                name,
+                                status: u
+                                    .fields
+                                    .status
+                                    .map(tool_status)
+                                    .unwrap_or("running")
+                                    .into(),
+                                detail: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                    if !out.is_empty() {
+                        q.lock().unwrap().extend(out);
                     }
                     Ok(())
                 },
                 acp::on_receive_notification!(),
             )
-            // One-shot: auto-approve the first permission option, no UI.
             .on_receive_request(
                 async move |request: RequestPermissionRequest, responder, _connection| match request
                     .options
@@ -296,8 +343,6 @@ impl ChatAgent for ClaudeCodeAgent {
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
-                // Isolate the agent from Manch's own working dir: hand Claude Code a
-                // dedicated, empty workspace so it does not read this project's files.
                 let cwd = std::env::temp_dir().join("manch-acp-workspace");
                 std::fs::create_dir_all(&cwd).ok();
                 let session = connection
@@ -316,14 +361,22 @@ impl ChatAgent for ClaudeCodeAgent {
             .await
             .map_err(|e| e.to_string())?;
 
-        let text = buf.lock().unwrap().clone();
-        eprintln!("[acp] final reply ({} chars)", text.len());
-        if text.trim().is_empty() {
-            return Err(format!(
-                "claude-code returned no text (stop reason: {stop:?})"
-            ));
+        // Drain queued events in arrival order, then finish.
+        let events = std::mem::take(&mut *queue.lock().unwrap());
+        let had_text = events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Token { .. }));
+        for ev in events {
+            sink.emit(ev);
         }
-        Ok(text)
+        if had_text {
+            sink.emit(StreamEvent::Done);
+        } else {
+            sink.emit(StreamEvent::Error {
+                message: format!("claude-code returned no text (stop reason: {stop:?})"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -350,6 +403,7 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hi");
         assert!(body["max_tokens"].is_number());
+        assert_eq!(body["stream"], true);
     }
 
     #[test]
@@ -386,39 +440,6 @@ mod tests {
         assert_eq!(args[0], "ANTHROPIC_API_KEY=sk-test");
         assert!(args.iter().any(|a| a == "npx"));
         assert!(args.iter().any(|a| a.contains("claude-agent-acp")));
-    }
-
-    #[test]
-    fn merge_chunk_dedups_exact_repeat() {
-        let mut b = String::new();
-        merge_chunk(&mut b, "New Delhi.");
-        merge_chunk(&mut b, "New Delhi.");
-        assert_eq!(b, "New Delhi.");
-    }
-
-    #[test]
-    fn merge_chunk_appends_distinct_deltas() {
-        let mut b = String::new();
-        merge_chunk(&mut b, "New");
-        merge_chunk(&mut b, " Delhi.");
-        assert_eq!(b, "New Delhi.");
-    }
-
-    #[test]
-    fn merge_chunk_replaces_cumulative_snapshot() {
-        let mut b = String::new();
-        merge_chunk(&mut b, "New");
-        merge_chunk(&mut b, "New Delhi.");
-        assert_eq!(b, "New Delhi.");
-    }
-
-    #[test]
-    fn merge_chunk_drops_final_full_repeat_after_deltas() {
-        let mut b = String::new();
-        merge_chunk(&mut b, "New");
-        merge_chunk(&mut b, " Delhi.");
-        merge_chunk(&mut b, "New Delhi."); // adapter's final full-message repeat
-        assert_eq!(b, "New Delhi.");
     }
 
     #[test]
