@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../lib/api";
+import type { Provider } from "../lib/providers";
 import type { CreateWorkspace, CreateTeam, CreateSchedule } from "./bindings";
 
 export function useConfiguredProviders() {
@@ -8,7 +9,7 @@ export function useConfiguredProviders() {
 export function useSaveApiKey() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ provider, apiKey }: { provider: import("../lib/providers").Provider; apiKey: string }) =>
+    mutationFn: ({ provider, apiKey }: { provider: Provider; apiKey: string }) =>
       api.saveApiKey(provider, apiKey),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
   });
@@ -69,6 +70,11 @@ export function useCreateSchedule() {
   });
 }
 
+/**
+ * @param kinds result-kind filter; part of the query key. React Query v5
+ * hashes keys structurally, so passing a fresh array literal each render is
+ * safe (equal contents → cache hit) — no need to memoize at the call site.
+ */
 export function useSearch(workspaceId: string | null, query: string, kinds: string[]) {
   return useQuery({
     queryKey: ["search", workspaceId, query, kinds],
