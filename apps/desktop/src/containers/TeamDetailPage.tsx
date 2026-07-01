@@ -1,6 +1,6 @@
 import { useParams } from "@tanstack/react-router";
 import { useAtomValue } from "jotai";
-import { TeamDetail, EmptyState } from "@manch/ui";
+import { TeamDetail, EmptyState, PuppetLoader } from "@manch/ui";
 import { activeWorkspaceIdAtom } from "../store/atoms";
 import { useTeam, useAssignTeamTask } from "../data/queries";
 
@@ -10,7 +10,12 @@ export default function TeamDetailPage() {
   const team = useTeam(teamId);
   const assign = useAssignTeamTask();
 
-  if (team.isLoading) return <EmptyState glyph="⏳" title="Loading…" />;
+  if (team.isLoading)
+    return (
+      <div className="flex h-full items-center justify-center">
+        <PuppetLoader label="Loading…" />
+      </div>
+    );
   // Scope to the active workspace: a direct /teams/$teamId URL for another
   // workspace's team must not render here.
   if (!team.data || team.data.workspace_id !== activeWorkspaceId)
