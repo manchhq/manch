@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -11,7 +12,7 @@ export interface CompareViewProps {
   summary: string;
 }
 
-export function CompareView({ reports, summary }: CompareViewProps) {
+export function CompareView({ reports, summary }: CompareViewProps): JSX.Element {
   return (
     <div className="space-y-4 p-4">
       <div

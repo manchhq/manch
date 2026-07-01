@@ -1,12 +1,15 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createStore, Provider as JotaiProvider } from "jotai";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const invoke = vi.fn();
+// Hoisted so the mock factory (also hoisted) can close over a stable spy we
+// can assert against.
+const { navigate } = vi.hoisted(() => ({ navigate: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
 // Mock the engine so single-provider path is instant (avoids 300 ms sleep delays)
 vi.mock("../engine/mockEngine", () => ({
@@ -46,6 +49,7 @@ function wrap(ui: React.ReactNode, store: ReturnType<typeof createStore>) {
 describe("Stage", () => {
   beforeEach(() => {
     invoke.mockReset();
+    navigate.mockReset();
     localStorage.clear();
   });
 
@@ -79,6 +83,41 @@ describe("Stage", () => {
     expect(invoke).toHaveBeenCalledWith("cross_verify", expect.objectContaining({ providers: ["anthropic", "claude-code"] }));
     expect(screen.getByText("anthropic")).toBeTruthy();
     expect(screen.getByText("claude-code")).toBeTruthy();
+  });
+
+  it("clears a stale CompareView when the active conversation changes", async () => {
+    const store = createStore();
+    store.set(conversationsAtom, [
+      { id: "c1", title: "T1", messages: [], toolCalls: [] },
+      { id: "c2", title: "T2", messages: [], toolCalls: [] },
+    ]);
+    store.set(activeIdAtom, "c1");
+    store.set(compareProvidersAtom, ["anthropic", "claude-code"]);
+
+    invoke.mockImplementation((cmd: string) =>
+      cmd === "cross_verify"
+        ? Promise.resolve({
+            reports: [
+              { provider: "anthropic", text: "A" },
+              { provider: "claude-code", text: "B" },
+            ],
+            summary: "agree",
+          })
+        : cmd === "list_configured_providers"
+          ? Promise.resolve(["anthropic", "claude-code"])
+          : Promise.resolve([]),
+    );
+
+    render(wrap(<Stage />, store));
+
+    await userEvent.type(screen.getByPlaceholderText("Message…"), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(screen.getByText(/cross-verification/i)).toBeTruthy());
+
+    // Switching the active conversation must drop the previous CompareView
+    // (the mutation result is not scoped to a conversation).
+    act(() => store.set(activeIdAtom, "c2"));
+    await waitFor(() => expect(screen.queryByText(/cross-verification/i)).toBeNull());
   });
 
   it("uses single-provider path when compareProvidersAtom is empty (no-regression guard)", async () => {
@@ -143,9 +182,10 @@ describe("Stage", () => {
     const sendBtn = screen.getByRole("button", { name: /send/i });
     expect((sendBtn as HTMLButtonElement).disabled).toBe(true);
 
-    // A link/button to settings must be present
+    // Clicking the nudge must navigate to Settings (not just render the button).
     const settingsLink = screen.getByRole("button", { name: /configure/i });
-    expect(settingsLink).toBeTruthy();
+    await userEvent.click(settingsLink);
+    expect(navigate).toHaveBeenCalledWith({ to: "/settings" });
   });
 
   it("shows an inviting empty state when there are no conversations and clicking 'New conversation' creates one", async () => {

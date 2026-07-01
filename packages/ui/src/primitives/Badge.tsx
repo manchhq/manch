@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { ReactNode } from "react";
 
 const TONE = {
@@ -7,6 +8,6 @@ const TONE = {
   error: "badge-error",
 } as const;
 
-export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: keyof typeof TONE }) {
+export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: keyof typeof TONE }): JSX.Element {
   return <span className={`badge ${TONE[tone]}`}>{children}</span>;
 }

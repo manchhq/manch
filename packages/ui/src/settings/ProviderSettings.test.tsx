@@ -8,8 +8,8 @@ const all = [{ id: "anthropic", label: "Anthropic" }, { id: "claude-code", label
 describe("ProviderSettings", () => {
   it("lists configured providers", () => {
     render(<ProviderSettings all={all} configured={["anthropic"]} onSave={() => {}} />);
-    // "Anthropic" appears in the list and in the select options — use getAllByText
-    expect(screen.getAllByText(/Anthropic/).length).toBeGreaterThan(0);
+    // "Anthropic" appears twice: the list <span> and the select <option>.
+    expect(screen.getAllByText(/Anthropic/).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/configured/i)).toBeTruthy();
   });
 

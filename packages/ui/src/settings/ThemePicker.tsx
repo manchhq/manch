@@ -1,10 +1,11 @@
+import type { JSX } from "react";
 export interface ThemePickerProps {
   themes: string[];
   active: string;
   onSelect: (theme: string) => void;
 }
 
-export function ThemePicker({ themes, active, onSelect }: ThemePickerProps) {
+export function ThemePicker({ themes, active, onSelect }: ThemePickerProps): JSX.Element {
   return (
     <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-3">
       <legend className="mb-2 text-sm font-medium text-base-content">Theme</legend>

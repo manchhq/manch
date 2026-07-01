@@ -1,8 +1,9 @@
+import type { JSX } from "react";
 export function IconRail({
   items,
 }: {
   items: { id: string; glyph: string; label: string; onClick: () => void }[];
-}) {
+}): JSX.Element {
   return (
     <nav className="flex flex-col items-center gap-2 py-2">
       {items.map((it) => (

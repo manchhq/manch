@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { ToolCallData, AgentStatus } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { StatusDot } from "../primitives/StatusDot";
@@ -8,7 +9,7 @@ export function PerformancePanel({
   status: AgentStatus;
   toolCalls: ToolCallData[];
   files: string[];
-}) {
+}): JSX.Element {
   return (
     <div className="flex flex-col gap-4 p-3">
       <div className="flex items-center justify-between">

@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 export function Composer({
   value, onChange, onSend, busy = false,
 }: {
@@ -5,7 +6,7 @@ export function Composer({
   onChange: (next: string) => void;
   onSend: () => void;
   busy?: boolean;
-}) {
+}): JSX.Element {
   const canSend = !busy && value.trim().length > 0;
   return (
     <form

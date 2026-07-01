@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 export interface TeamSummary {
   id: string;
   name: string;
@@ -10,7 +11,7 @@ export interface TeamCardProps {
   onOpen: (id: string) => void;
 }
 
-export function TeamCard({ team, onOpen }: TeamCardProps) {
+export function TeamCard({ team, onOpen }: TeamCardProps): JSX.Element {
   return (
     <button
       onClick={() => onOpen(team.id)}

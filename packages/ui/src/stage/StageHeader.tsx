@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { ProviderOption, AgentStatus } from "../types";
 import { StatusDot } from "../primitives/StatusDot";
 
@@ -8,7 +9,7 @@ export function StageHeader({
   activeProvider: string;
   onProviderChange: (id: string) => void;
   status: AgentStatus;
-}) {
+}): JSX.Element {
   return (
     <header className="flex items-center justify-between border-b border-base-300 px-4 py-2">
       <select

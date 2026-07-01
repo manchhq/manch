@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { ConversationSummary } from "../types";
 
 export function GreenRoomView({
@@ -8,7 +9,7 @@ export function GreenRoomView({
   onSelect: (id: string) => void;
   onNew: () => void;
   onOpenSettings: () => void;
-}) {
+}): JSX.Element {
   return (
     <div className="flex h-full flex-col">
       <div className="p-2">

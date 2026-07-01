@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 export interface EmptyStateProps {
   glyph?: string;
   title: string;
@@ -5,7 +6,7 @@ export interface EmptyStateProps {
   action?: { label: string; onClick: () => void };
 }
 
-export function EmptyState({ glyph, title, description, action }: EmptyStateProps) {
+export function EmptyState({ glyph, title, description, action }: EmptyStateProps): JSX.Element {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
       {glyph && <div className="text-4xl opacity-60" aria-hidden>{glyph}</div>}

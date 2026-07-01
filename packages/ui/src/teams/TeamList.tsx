@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { TeamCard, type TeamSummary } from "./TeamCard";
 
 export interface TeamListProps {
@@ -6,7 +7,7 @@ export interface TeamListProps {
   onNew: () => void;
 }
 
-export function TeamList({ teams, onOpen, onNew }: TeamListProps) {
+export function TeamList({ teams, onOpen, onNew }: TeamListProps): JSX.Element {
   return (
     <div className="flex h-full flex-col gap-4 p-6">
       <div className="flex items-center justify-between">

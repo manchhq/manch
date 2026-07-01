@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import { useState } from "react";
 import type { ProviderOption } from "../types";
 
@@ -8,7 +9,7 @@ export function SettingsForm({
   onSave: (provider: string, apiKey: string) => void;
   saving?: boolean;
   error?: string | null;
-}) {
+}): JSX.Element {
   const [provider, setProvider] = useState(providers[0]?.id ?? "");
   const [apiKey, setApiKey] = useState("");
   return (

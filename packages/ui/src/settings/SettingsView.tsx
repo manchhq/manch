@@ -1,3 +1,4 @@
+import type { JSX } from "react";
 import type { ReactNode } from "react";
 
 export interface SettingsViewProps {
@@ -6,7 +7,7 @@ export interface SettingsViewProps {
   workspaces: ReactNode;
 }
 
-export function SettingsView({ providers, theme, workspaces }: SettingsViewProps) {
+export function SettingsView({ providers, theme, workspaces }: SettingsViewProps): JSX.Element {
   return (
     <div className="mx-auto max-w-2xl space-y-8 overflow-y-auto p-6">
       <h1 className="text-xl font-semibold">Settings</h1>
