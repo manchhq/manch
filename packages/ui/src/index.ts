@@ -9,6 +9,7 @@ export { Badge } from "./primitives/Badge";
 export { Panel } from "./primitives/Panel";
 export { IconRail } from "./primitives/IconRail";
 export { Spotlight } from "./primitives/Spotlight";
+export { PuppetLoader } from "./primitives/PuppetLoader";
 export { NavRail } from "./primitives/NavRail";
 export type { NavItem, NavRailProps } from "./primitives/NavRail";
 export { Message } from "./stage/Message";
