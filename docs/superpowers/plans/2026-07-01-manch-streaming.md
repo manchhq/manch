@@ -123,9 +123,10 @@ git commit -m "feat(dto): add StreamEvent wire type for agent streaming"
     fn push_chunk_drops_trailing_full_repeat() {
         let mut b = String::new();
         push_chunk(&mut b, "New");
-        push_chunk(&mut b, " Delhi.");
-        assert_eq!(push_chunk(&mut b, "New Delhi."), Some(" Delhi.".to_string()));
-        // final identical repeat yields no new delta
+        push_chunk(&mut b, " Delhi."); // delta accumulation → buf is already "New Delhi."
+        // the full-message repeat adds nothing new
+        assert_eq!(push_chunk(&mut b, "New Delhi."), None);
+        // final identical repeat also yields no new delta
         assert_eq!(push_chunk(&mut b, "New Delhi."), None);
         assert_eq!(b, "New Delhi.");
     }
