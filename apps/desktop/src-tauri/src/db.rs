@@ -17,14 +17,28 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}{t:x}{n:x}")
 }
 
+/// Parse a JSON column, falling back to the default on corrupt data but
+/// surfacing a warning first — a silent `unwrap_or_default()` would mask a
+/// tampered `teams` row as an empty vec with no trace.
+fn parse_json_col<T: serde::de::DeserializeOwned + Default>(
+    raw: &str,
+    field: &str,
+    team_id: &str,
+) -> T {
+    serde_json::from_str(raw).unwrap_or_else(|e| {
+        eprintln!("[db] team {team_id}: corrupt `{field}` JSON ({e}); falling back to default");
+        T::default()
+    })
+}
+
 fn row_to_team(r: &rusqlite::Row<'_>) -> rusqlite::Result<manch_dto::Team> {
+    let id: String = r.get(0)?;
     let members_json: String = r.get(4)?;
     let caps_json: String = r.get(5)?;
-    let members: Vec<manch_dto::TeamMember> =
-        serde_json::from_str(&members_json).unwrap_or_default();
-    let capabilities: Vec<String> = serde_json::from_str(&caps_json).unwrap_or_default();
+    let members: Vec<manch_dto::TeamMember> = parse_json_col(&members_json, "members", &id);
+    let capabilities: Vec<String> = parse_json_col(&caps_json, "capabilities", &id);
     Ok(manch_dto::Team {
-        id: r.get(0)?,
+        id,
         workspace_id: r.get(1)?,
         name: r.get(2)?,
         problem: r.get(3)?,
