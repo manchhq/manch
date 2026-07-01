@@ -5,6 +5,7 @@
 //! No `rig`: the Anthropic path is a hand-rolled Messages-API call over `reqwest`.
 
 use async_trait::async_trait;
+use manch_dto::StreamEvent;
 
 /// Anthropic model id (authoritative per the claude-api skill — do NOT change).
 const ANTHROPIC_MODEL: &str = "claude-opus-4-8";
@@ -107,6 +108,65 @@ pub fn offerable_providers(mut saved: Vec<String>) -> Vec<String> {
     saved.sort();
     saved.dedup();
     saved
+}
+
+/// A destination for streamed agent events. Production wraps a Tauri `Channel`;
+/// tests use a `Vec` collector. Keeps the agents ignorant of Tauri specifics.
+#[allow(dead_code)] // wired to streaming agents in Tasks 3–4
+pub trait EventSink: Send + Sync {
+    fn emit(&self, event: StreamEvent);
+}
+
+/// Merge one streamed chunk into `buf`, returning the newly-added text to emit
+/// (`None` if nothing new). ACP adapters vary — pure deltas, cumulative
+/// snapshots, and a trailing full-message repeat — this tolerates all three so
+/// we never double-emit ("New Delhi.New Delhi."). Pure.
+#[allow(dead_code)] // used by streaming tasks (Tasks 3–4); silence until then
+pub(crate) fn push_chunk(buf: &mut String, chunk: &str) -> Option<String> {
+    if chunk.is_empty() {
+        None
+    } else if buf.is_empty() {
+        buf.push_str(chunk);
+        Some(chunk.to_string())
+    } else if chunk.starts_with(buf.as_str()) {
+        // cumulative snapshot: the delta is the suffix beyond what we have
+        let delta = chunk[buf.len()..].to_string();
+        *buf = chunk.to_string();
+        (!delta.is_empty()).then_some(delta)
+    } else if buf.ends_with(chunk) {
+        None // trailing duplicate already present
+    } else {
+        buf.push_str(chunk);
+        Some(chunk.to_string())
+    }
+}
+
+/// Extract the text of one Anthropic streaming SSE `data:` payload; `None` for
+/// any non-text event (`message_start`, `ping`, `content_block_stop`, …). Pure.
+#[allow(dead_code)] // used by AnthropicAgent streaming in Task 3
+pub(crate) fn parse_sse_delta(data: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    if v.get("type")?.as_str()? != "content_block_delta" {
+        return None;
+    }
+    let delta = v.get("delta")?;
+    if delta.get("type")?.as_str()? != "text_delta" {
+        return None;
+    }
+    Some(delta.get("text")?.as_str()?.to_string())
+}
+
+/// Map an ACP tool-call status onto the stage's `running|done|error` vocabulary.
+#[allow(dead_code)] // used by tool-call streaming in Task 4
+pub(crate) fn tool_status(
+    status: agent_client_protocol::schema::v1::ToolCallStatus,
+) -> &'static str {
+    use agent_client_protocol::schema::v1::ToolCallStatus;
+    match status {
+        ToolCallStatus::Completed => "done",
+        ToolCallStatus::Failed => "error",
+        _ => "running", // Pending / InProgress / future
+    }
 }
 
 /// Merge one streamed `AgentMessageChunk` into the accumulator. ACP adapters vary:
@@ -372,5 +432,72 @@ mod tests {
             offerable_providers(vec!["claude-code".into()]),
             vec!["claude-code".to_string()]
         );
+    }
+
+    // --- push_chunk tests ---
+
+    #[test]
+    fn push_chunk_returns_full_first_chunk() {
+        let mut b = String::new();
+        assert_eq!(push_chunk(&mut b, "New "), Some("New ".to_string()));
+        assert_eq!(b, "New ");
+    }
+
+    #[test]
+    fn push_chunk_returns_only_the_delta_for_cumulative_snapshot() {
+        let mut b = String::new();
+        push_chunk(&mut b, "New");
+        assert_eq!(
+            push_chunk(&mut b, "New Delhi."),
+            Some(" Delhi.".to_string())
+        );
+        assert_eq!(b, "New Delhi.");
+    }
+
+    #[test]
+    fn push_chunk_appends_distinct_delta() {
+        let mut b = String::new();
+        push_chunk(&mut b, "New");
+        assert_eq!(push_chunk(&mut b, " Delhi."), Some(" Delhi.".to_string()));
+        assert_eq!(b, "New Delhi.");
+    }
+
+    #[test]
+    fn push_chunk_drops_trailing_full_repeat() {
+        let mut b = String::new();
+        push_chunk(&mut b, "New");
+        push_chunk(&mut b, " Delhi.");
+        // after delta accumulation buf is already "New Delhi."; the full repeat is dropped
+        assert_eq!(push_chunk(&mut b, "New Delhi."), None);
+        // final identical repeat also yields no new delta
+        assert_eq!(push_chunk(&mut b, "New Delhi."), None);
+        assert_eq!(b, "New Delhi.");
+    }
+
+    // --- parse_sse_delta tests ---
+
+    #[test]
+    fn parse_sse_delta_extracts_text_delta() {
+        let data =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;
+        assert_eq!(parse_sse_delta(data), Some("Hi".to_string()));
+    }
+
+    #[test]
+    fn parse_sse_delta_ignores_non_text_events() {
+        assert_eq!(parse_sse_delta(r#"{"type":"message_start"}"#), None);
+        assert_eq!(parse_sse_delta(r#"{"type":"ping"}"#), None);
+        assert_eq!(parse_sse_delta("not json"), None);
+    }
+
+    // --- tool_status tests ---
+
+    #[test]
+    fn tool_status_maps_acp_to_stage_vocabulary() {
+        use agent_client_protocol::schema::v1::ToolCallStatus;
+        assert_eq!(tool_status(ToolCallStatus::Completed), "done");
+        assert_eq!(tool_status(ToolCallStatus::Failed), "error");
+        assert_eq!(tool_status(ToolCallStatus::InProgress), "running");
+        assert_eq!(tool_status(ToolCallStatus::Pending), "running");
     }
 }
