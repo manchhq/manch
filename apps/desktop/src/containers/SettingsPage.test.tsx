@@ -33,9 +33,11 @@ describe("SettingsPage", () => {
   it("renders all providers from ALL_PROVIDERS", async () => {
     invoke.mockResolvedValue([]);
     render(wrap(<SettingsPage />));
+    // Each provider label renders twice: the providers list <span> and the
+    // provider <select> <option>.
     const anthropicItems = await screen.findAllByText(/Anthropic/i);
-    expect(anthropicItems.length).toBeGreaterThan(0);
+    expect(anthropicItems.length).toBeGreaterThanOrEqual(2);
     const claudeCodeItems = await screen.findAllByText(/Claude Code/i);
-    expect(claudeCodeItems.length).toBeGreaterThan(0);
+    expect(claudeCodeItems.length).toBeGreaterThanOrEqual(2);
   });
 });
