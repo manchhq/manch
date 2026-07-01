@@ -63,4 +63,19 @@ describe("tauriEngine", () => {
     });
     expect(events).toEqual([{ kind: "error", message: "boom" }]);
   });
+
+  it("maps tool detail null to undefined", async () => {
+    const events = await collect("anthropic", "hi", (ch) => {
+      ch.onmessage?.({ kind: "tool", id: "t1", name: "read", status: "running", detail: null });
+      ch.onmessage?.({ kind: "done" });
+    });
+    expect(events[0]).toEqual({ kind: "tool", id: "t1", name: "read", status: "running", detail: undefined });
+  });
+
+  it("surfaces a rejected command invoke as an error event", async () => {
+    invoke.mockImplementation(() => Promise.reject("backend boom"));
+    const out: StageEvent[] = [];
+    for await (const ev of tauriEngine.send("anthropic", "hi")) out.push(ev);
+    expect(out).toEqual([{ kind: "error", message: "backend boom" }]);
+  });
 });

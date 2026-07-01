@@ -4,6 +4,8 @@
 //! is extracted (`ask` becomes a streaming `prompt` through an `EventSink`).
 //! No `rig`: the Anthropic path is a hand-rolled Messages-API call over `reqwest`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use manch_dto::StreamEvent;
 
@@ -49,7 +51,7 @@ pub trait ChatAgent: Send + Sync {
     /// Stream the answer to `prompt`, emitting `Token`/`Tool` events into `sink`
     /// and finishing with `Done` (or `Error`). Returns `Err` only for failures
     /// that occur before any event could be emitted.
-    async fn stream(&self, prompt: &str, sink: &dyn EventSink) -> Result<(), String>;
+    async fn stream(&self, prompt: &str, sink: Arc<dyn EventSink>) -> Result<(), String>;
 }
 
 /// Build the Anthropic Messages API request body. Pure.
@@ -157,6 +159,21 @@ pub(crate) fn parse_sse_delta(data: &str) -> Option<String> {
     Some(delta.get("text")?.as_str()?.to_string())
 }
 
+/// Extract the message of an Anthropic streaming `error` event payload (e.g. a
+/// mid-stream `overloaded_error`); `None` for any non-error frame. Pure.
+fn parse_sse_error(data: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    if v.get("type")?.as_str()? != "error" {
+        return None;
+    }
+    let msg = v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("stream error");
+    Some(format!("anthropic: {msg}"))
+}
+
 /// Map an ACP tool-call status onto the stage's `running|done|error` vocabulary.
 pub(crate) fn tool_status(
     status: agent_client_protocol::schema::v1::ToolCallStatus,
@@ -182,7 +199,7 @@ impl AnthropicAgent {
 
 #[async_trait]
 impl ChatAgent for AnthropicAgent {
-    async fn stream(&self, prompt: &str, sink: &dyn EventSink) -> Result<(), String> {
+    async fn stream(&self, prompt: &str, sink: Arc<dyn EventSink>) -> Result<(), String> {
         use futures_util::StreamExt;
         ensure_crypto_provider();
         let resp = reqwest::Client::new()
@@ -205,20 +222,27 @@ impl ChatAgent for AnthropicAgent {
             return Ok(());
         }
 
-        // SSE frames arrive as `\n`-separated lines; buffer partial lines across
-        // network chunks and act only on `data:` payloads.
+        // Buffer raw BYTES and decode only COMPLETE lines. `resp.bytes_stream()`
+        // yields arbitrary byte boundaries; a multibyte UTF-8 char (Devanagari,
+        // CJK, emoji) split across two network chunks must not be lossily decoded.
+        // Splitting on the ASCII `\n` byte guarantees each drained line is a whole
+        // sequence of complete chars, so its decode is lossless.
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| e.to_string())?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim().to_string();
-                buf.drain(..=nl);
+            buf.extend_from_slice(&bytes);
+            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim();
                 if let Some(data) = line.strip_prefix("data:") {
                     let data = data.trim();
                     if let Some(text) = parse_sse_delta(data) {
                         sink.emit(StreamEvent::Token { text });
+                    } else if let Some(err) = parse_sse_error(data) {
+                        sink.emit(StreamEvent::Error { message: err });
+                        return Ok(());
                     }
                 }
             }
@@ -242,9 +266,9 @@ impl ClaudeCodeAgent {
 
 #[async_trait]
 impl ChatAgent for ClaudeCodeAgent {
-    async fn stream(&self, prompt: &str, sink: &dyn EventSink) -> Result<(), String> {
+    async fn stream(&self, prompt: &str, sink: Arc<dyn EventSink>) -> Result<(), String> {
         use std::collections::HashMap;
-        use std::sync::{Arc, Mutex};
+        use std::sync::Mutex;
 
         use agent_client_protocol::schema::ProtocolVersion;
         use agent_client_protocol::schema::v1::{
@@ -258,36 +282,37 @@ impl ChatAgent for ClaudeCodeAgent {
             .map_err(|e| e.to_string())?;
         let prompt = prompt.to_string();
 
-        // Forward events as they arrive. The handler is a `'static` async closure,
-        // so it owns Arc clones. We collect StreamEvents into a queue drained after
-        // the run (the `Client` handler cannot borrow `sink` directly), preserving
-        // arrival order. `buf` dedups token chunks; `names` resolves tool titles
-        // across ToolCallUpdate (which may omit the title).
-        let queue: Arc<Mutex<Vec<StreamEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let q = queue.clone();
+        // Emit events live from the `'static` notification handler by cloning an
+        // owned `Arc<dyn EventSink>` into it. `buf` dedups token chunks; `names`
+        // resolves tool titles across title-less ToolCallUpdates; `emitted` gates
+        // the terminal Done/Error (any Token OR Tool counts as output).
         let buf = Arc::new(Mutex::new(String::new()));
         let names: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-        let nb = buf.clone();
-        let nn = names.clone();
+        let emitted = Arc::new(Mutex::new(false));
+        let hsink = sink.clone();
+        let hbuf = buf.clone();
+        let hnames = names.clone();
+        let hemitted = emitted.clone();
 
         let stop = Client
             .builder()
             .on_receive_notification(
                 async move |n: SessionNotification, _cx| {
-                    let mut out: Vec<StreamEvent> = Vec::new();
                     match n.update {
                         SessionUpdate::AgentMessageChunk(ContentChunk {
                             content: ContentBlock::Text(text),
                             ..
                         }) => {
-                            if let Some(delta) = push_chunk(&mut nb.lock().unwrap(), &text.text) {
-                                out.push(StreamEvent::Token { text: delta });
+                            if let Some(delta) = push_chunk(&mut hbuf.lock().unwrap(), &text.text) {
+                                *hemitted.lock().unwrap() = true;
+                                hsink.emit(StreamEvent::Token { text: delta });
                             }
                         }
                         SessionUpdate::ToolCall(tc) => {
                             let id = tc.tool_call_id.0.to_string();
-                            nn.lock().unwrap().insert(id.clone(), tc.title.clone());
-                            out.push(StreamEvent::Tool {
+                            hnames.lock().unwrap().insert(id.clone(), tc.title.clone());
+                            *hemitted.lock().unwrap() = true;
+                            hsink.emit(StreamEvent::Tool {
                                 id,
                                 name: tc.title,
                                 status: tool_status(tc.status).into(),
@@ -300,9 +325,10 @@ impl ChatAgent for ClaudeCodeAgent {
                                 .fields
                                 .title
                                 .clone()
-                                .or_else(|| nn.lock().unwrap().get(&id).cloned())
+                                .or_else(|| hnames.lock().unwrap().get(&id).cloned())
                                 .unwrap_or_default();
-                            out.push(StreamEvent::Tool {
+                            *hemitted.lock().unwrap() = true;
+                            hsink.emit(StreamEvent::Tool {
                                 id,
                                 name,
                                 status: u
@@ -315,9 +341,6 @@ impl ChatAgent for ClaudeCodeAgent {
                             });
                         }
                         _ => {}
-                    }
-                    if !out.is_empty() {
-                        q.lock().unwrap().extend(out);
                     }
                     Ok(())
                 },
@@ -361,15 +384,7 @@ impl ChatAgent for ClaudeCodeAgent {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Drain queued events in arrival order, then finish.
-        let events = std::mem::take(&mut *queue.lock().unwrap());
-        let had_text = events
-            .iter()
-            .any(|e| matches!(e, StreamEvent::Token { .. }));
-        for ev in events {
-            sink.emit(ev);
-        }
-        if had_text {
+        if *emitted.lock().unwrap() {
             sink.emit(StreamEvent::Done);
         } else {
             sink.emit(StreamEvent::Error {
@@ -509,6 +524,21 @@ mod tests {
         assert_eq!(parse_sse_delta(r#"{"type":"message_start"}"#), None);
         assert_eq!(parse_sse_delta(r#"{"type":"ping"}"#), None);
         assert_eq!(parse_sse_delta("not json"), None);
+    }
+
+    #[test]
+    fn parse_sse_error_extracts_message() {
+        let data = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert_eq!(
+            parse_sse_error(data),
+            Some("anthropic: Overloaded".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_sse_error_ignores_non_error_frames() {
+        assert_eq!(parse_sse_error(r#"{"type":"content_block_delta"}"#), None);
+        assert_eq!(parse_sse_error("not json"), None);
     }
 
     // --- tool_status tests ---

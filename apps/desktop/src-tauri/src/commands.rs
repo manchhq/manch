@@ -1,5 +1,7 @@
 //! Tauri commands the frontend invokes. Thin glue over `db` + `agent`.
 
+use std::sync::Arc;
+
 use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
 use crate::db::Db;
 use manch_dto::{
@@ -57,8 +59,8 @@ pub async fn send_prompt_stream(
             Box::new(ClaudeCodeAgent::new(key))
         }
     };
-    let sink = ChannelSink(channel);
-    agent.stream(&text, &sink).await
+    let sink: Arc<dyn crate::agent::EventSink> = Arc::new(ChannelSink(channel));
+    agent.stream(&text, sink).await
 }
 
 #[tauri::command]

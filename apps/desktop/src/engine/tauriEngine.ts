@@ -38,13 +38,26 @@ export const tauriEngine: StageEngine = {
       notify?.();
     };
 
-    const done = invoke("send_prompt_stream", { provider, text, channel }).catch(
-      (e: unknown): void => {
+    const done = invoke("send_prompt_stream", { provider, text, channel })
+      .then(() => {
+        // Both agents always emit a terminal done/error over the channel as
+        // their LAST message, so `finished` is normally already set here. As a
+        // safety net against a future Rust path that returns without a terminal
+        // event, wake the drain loop on the NEXT macrotask — after any
+        // already-enqueued channel messages have been delivered and processed
+        // (so this never truncates in-flight output) — and let it terminate.
+        setTimeout(() => {
+          if (!finished) {
+            finished = true;
+            notify?.();
+          }
+        }, 0);
+      })
+      .catch((e: unknown): void => {
         queue.push({ kind: "error", message: typeof e === "string" ? e : String(e) });
         finished = true;
         notify?.();
-      },
-    );
+      });
 
     // Drain until a terminal event has been yielded.
     for (;;) {
