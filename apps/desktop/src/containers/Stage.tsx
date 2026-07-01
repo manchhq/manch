@@ -1,5 +1,5 @@
 import { useAtomValue, useAtom, useSetAtom } from "jotai";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { StageHeader, Transcript, Composer, CompareView, EmptyState } from "@manch/ui";
 import { ALL_PROVIDERS, type Provider } from "../lib/providers";
@@ -31,6 +31,15 @@ export default function Stage() {
   const navigate = useNavigate();
   const setConversations = useSetAtom(conversationsAtom);
   const setActiveId = useSetAtom(activeIdAtom);
+
+  // `crossVerify.data` is component-held mutation state, not scoped to a
+  // conversation. Clear it when the compare set or the active conversation
+  // changes so a stale CompareView doesn't flash on re-entry/switch.
+  const resetCrossVerify = crossVerify.reset;
+  const convoId = convo?.id;
+  useEffect(() => {
+    resetCrossVerify();
+  }, [compareProviders, convoId, resetCrossVerify]);
 
   const isCompareMode = compareProviders.length > 1;
   // Only gate after the query has settled — undefined means still loading (don't block)
