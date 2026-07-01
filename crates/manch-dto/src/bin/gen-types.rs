@@ -4,7 +4,7 @@
 
 use manch_dto::{
     CreateSchedule, CreateTeam, CreateWorkspace, CrossVerify, Report, RunStep, Schedule, SearchHit,
-    Team, TeamMember, TeamRun, Workspace,
+    StreamEvent, Team, TeamMember, TeamRun, Workspace,
 };
 use ts_rs::TS;
 
@@ -24,6 +24,7 @@ fn declarations() -> Vec<String> {
         SearchHit::export_to_string(&cfg).expect("export SearchHit"),
         Report::export_to_string(&cfg).expect("export Report"),
         CrossVerify::export_to_string(&cfg).expect("export CrossVerify"),
+        StreamEvent::export_to_string(&cfg).expect("export StreamEvent"),
     ]
 }
 
