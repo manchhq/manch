@@ -12,8 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
 
 // Mock the engine so single-provider path is instant (avoids 300 ms sleep delays)
-vi.mock("../engine/mockEngine", () => ({
-  mockEngine: {
+vi.mock("../engine/tauriEngine", () => ({
+  tauriEngine: {
     async *send() {
       yield { kind: "token", text: "hi" };
       yield { kind: "done" };

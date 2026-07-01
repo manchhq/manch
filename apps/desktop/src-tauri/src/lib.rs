@@ -20,7 +20,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::save_api_key,
             commands::list_configured_providers,
-            commands::send_prompt,
+            commands::send_prompt_stream,
             commands::list_workspaces,
             commands::create_workspace,
             commands::rename_workspace,

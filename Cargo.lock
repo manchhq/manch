@@ -2349,6 +2349,7 @@ version = "0.0.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
+ "futures-util",
  "manch-dto",
  "reqwest",
  "rusqlite",

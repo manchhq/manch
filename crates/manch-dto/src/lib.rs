@@ -107,3 +107,27 @@ pub struct CrossVerify {
     pub reports: Vec<Report>,
     pub summary: String,
 }
+
+/// Wire event streamed from an agent to the stage. Mirrors the frontend
+/// `StageEvent` union (`apps/desktop/src/engine/StageEngine.ts`); `tauriEngine`
+/// maps this onto it. Internally tagged on `kind` so the TS side is a plain
+/// discriminated union.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum StreamEvent {
+    Token {
+        text: String,
+    },
+    Tool {
+        id: String,
+        name: String,
+        /// "running" | "done" | "error"
+        status: String,
+        detail: Option<String>,
+    },
+    Done,
+    Error {
+        message: String,
+    },
+}

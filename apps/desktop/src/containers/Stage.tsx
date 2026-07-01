@@ -15,14 +15,14 @@ import {
 } from "../store/atoms";
 import { useSend } from "../data/useSend";
 import { useCrossVerify, useConfiguredProviders } from "../data/queries";
-import { mockEngine } from "../engine/mockEngine";
+import { tauriEngine } from "../engine/tauriEngine";
 
 export default function Stage() {
   const convo = useAtomValue(activeConversationAtom);
   const status = useAtomValue(agentStatusAtom);
   const isStreaming = useAtomValue(isStreamingAtom);
   const streamingText = useAtomValue(streamingTextAtom);
-  const { send, busy } = useSend(mockEngine);
+  const { send, busy } = useSend(tauriEngine);
   const [provider, setProvider] = useState(ALL_PROVIDERS[0].id);
   const [input, setInput] = useState("");
   const [compareProviders, setCompareProviders] = useAtom(compareProvidersAtom);
