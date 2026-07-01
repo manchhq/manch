@@ -12,7 +12,7 @@ export function Transcript({
 }): JSX.Element {
   if (messages.length === 0 && !isStreaming) {
     return (
-      <div data-testid="transcript-empty" className="flex h-full items-center justify-center text-center text-base-content/50">
+      <div data-testid="transcript-empty" className="flex h-full items-center justify-center text-center text-base-content/70">
         <p>The stage is set.<br />Send a prompt to begin the performance.</p>
       </div>
     );
@@ -23,7 +23,7 @@ export function Transcript({
     : messages;
 
   return (
-    <div className="flex flex-col gap-3 p-4">
+    <div className="flex flex-col gap-4 p-4">
       {live.map((m, i) => (
         <Spotlight key={m.id} active={i === live.length - 1}>
           <Message message={m} />

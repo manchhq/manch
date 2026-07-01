@@ -11,7 +11,7 @@ export function StageHeader({
   status: AgentStatus;
 }): JSX.Element {
   return (
-    <header className="flex items-center justify-between border-b border-base-300 px-4 py-2">
+    <header className="flex items-center justify-between border-b border-base-300 px-4 py-3 shadow-sm">
       <select
         className="select select-bordered select-sm"
         value={activeProvider}
