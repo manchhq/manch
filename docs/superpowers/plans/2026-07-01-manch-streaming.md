@@ -12,7 +12,7 @@
 
 - Rust ≥ 1.88, edition 2024; clippy is `-D warnings`; rustfmt enforced. Run `just fmt` before every Rust commit.
 - Anthropic model id is `claude-opus-4-8` (const `ANTHROPIC_MODEL`) — do NOT change.
-- `manch-dto` TS is generated: after editing DTOs run `just gen`; never hand-edit `apps/desktop/src/data/bindings.ts`.
+- `manch-dto` TS is generated: after editing DTOs run `just gen`; never hand-edit `apps/desktop/src/data/bindings.ts`. **`bindings.ts` is gitignored (`.gitignore:21`) — regenerate it locally with `just gen` but do NOT commit it; `just ci` regenerates it in CI.**
 - `StageEvent` (in `apps/desktop/src/engine/StageEngine.ts`) is the internal frontend contract and stays authoritative; `StreamEvent` is the wire type mapped onto it.
 - `applyEvent` appends token deltas (`state.text + event.text`) — the bridge MUST emit **incremental** deltas, never cumulative snapshots.
 - `just ci` must be green before any PR. Conventional Commits. PR references #17.
@@ -74,7 +74,8 @@ Expected: builds clean.
 
 ```bash
 just fmt
-git add crates/manch-dto/src/lib.rs crates/manch-dto/src/bin/gen-types.rs apps/desktop/src/data/bindings.ts
+# NOTE: bindings.ts is gitignored — regenerate it (just gen, above) but do NOT commit it.
+git add crates/manch-dto/src/lib.rs crates/manch-dto/src/bin/gen-types.rs
 git commit -m "feat(dto): add StreamEvent wire type for agent streaming"
 ```
 
