@@ -1,0 +1,24 @@
+[package]
+name = "manch-llm"
+description = "BYOK provider clients for Manch (Anthropic, Gemini, OpenAI), implementing manch_protocol::Agent."
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["anthropic", "gemini", "openai"]
+anthropic = []
+gemini = []
+openai = []
+
+[dependencies]
+manch-protocol = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
