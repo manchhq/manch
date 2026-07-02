@@ -200,7 +200,6 @@ impl Db {
     }
 
     /// Insert or replace the model for a provider.
-    #[allow(dead_code)]
     pub fn set_model(&self, provider: &str, model: &str) -> rusqlite::Result<()> {
         let conn = self.0.lock().unwrap();
         conn.execute(
@@ -212,7 +211,6 @@ impl Db {
     }
 
     /// Fetch the stored model for a provider, if any.
-    #[allow(dead_code)]
     pub fn get_model(&self, provider: &str) -> rusqlite::Result<Option<String>> {
         let conn = self.0.lock().unwrap();
         conn.query_row(

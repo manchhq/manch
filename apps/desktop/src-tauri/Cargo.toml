@@ -19,10 +19,9 @@ tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-futures-util = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
-agent-client-protocol = { version = "1", features = ["unstable"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 manch-dto = { workspace = true }
+manch-protocol = { workspace = true }
+manch-llm = { path = "../../../crates/manch-llm" }
+manch-acp = { path = "../../../crates/manch-acp" }

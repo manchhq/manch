@@ -2357,13 +2357,12 @@ dependencies = [
 name = "manch-desktop"
 version = "0.0.0"
 dependencies = [
- "agent-client-protocol",
  "async-trait",
- "futures-util",
+ "manch-acp",
  "manch-dto",
- "reqwest",
+ "manch-llm",
+ "manch-protocol",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "tauri",

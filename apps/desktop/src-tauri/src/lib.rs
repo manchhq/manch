@@ -20,6 +20,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::save_api_key,
             commands::list_configured_providers,
+            commands::list_models,
+            commands::set_model,
             commands::send_prompt_stream,
             commands::list_workspaces,
             commands::create_workspace,
