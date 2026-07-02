@@ -17,21 +17,12 @@ export function useSaveApiKey() {
 
 const modelsQueryKey = (provider: Provider) => ["models", provider] as const;
 
-/** Models for a single BYOK provider. `enabled` should gate on: is BYOK + has a saved key. */
-export function useModels(provider: Provider, enabled: boolean) {
-  return useQuery({
-    queryKey: modelsQueryKey(provider),
-    queryFn: () => api.listModels(provider),
-    enabled,
-  });
-}
-
 /**
  * Models for however many BYOK providers currently have a saved key.
  * `providerIds` is expected to already be filtered to BYOK providers (see
  * `isByokProvider`/`BYOK_PROVIDERS` in `lib/providers.ts`) — its length can
- * vary across renders, so this uses `useQueries` (rather than mapping
- * `useModels` in a loop) to stay Rules-of-Hooks safe.
+ * vary across renders, so this uses `useQueries` (rather than mapping a
+ * single-provider hook in a loop) to stay Rules-of-Hooks safe.
  */
 export function useModelsForProviders(providerIds: Provider[]) {
   return useQueries({
@@ -40,10 +31,8 @@ export function useModelsForProviders(providerIds: Provider[]) {
 }
 
 export function useSetModel() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ provider, model }: { provider: Provider; model: string }) => api.setModel(provider, model),
-    onSuccess: (_d, { provider }) => qc.invalidateQueries({ queryKey: modelsQueryKey(provider) }),
   });
 }
 

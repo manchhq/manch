@@ -2,7 +2,11 @@ import type { ProviderOption } from "@manch/ui";
 
 export const PROVIDERS = [
   { id: "anthropic", label: "Anthropic (Claude · BYOK)", kind: "byok" },
+  { id: "gemini", label: "Google Gemini (BYOK)", kind: "byok" },
+  { id: "openai", label: "OpenAI (Codex · BYOK)", kind: "byok" },
   { id: "claude-code", label: "Claude Code (ACP)", kind: "cli" },
+  { id: "gemini-cli", label: "Gemini CLI (ACP)", kind: "cli" },
+  { id: "codex", label: "Codex CLI (ACP)", kind: "cli" },
 ] as const;
 
 export type Provider = (typeof PROVIDERS)[number]["id"];
