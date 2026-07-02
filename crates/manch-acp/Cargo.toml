@@ -1,0 +1,15 @@
+[package]
+name = "manch-acp"
+description = "Framework-agnostic ACP host for Manch — wraps external CLI agents (Claude Code, Gemini CLI, Codex) as manch_protocol::Agent."
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+manch-protocol = { workspace = true }
+async-trait = { workspace = true }
+agent-client-protocol = { workspace = true, features = ["unstable"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

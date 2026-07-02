@@ -1,15 +1,32 @@
 import type { JSX } from "react";
 import { useForm } from "@tanstack/react-form";
 
+/** A selectable model for a BYOK provider (view-shape: camelCase, mapped from the DTO at the container boundary). */
+export interface ModelOption {
+  id: string;
+  displayName: string | null;
+}
+
 export interface ProviderSettingsProps {
   all: { id: string; label: string }[];
   configured: string[];
   onSave: (provider: string, apiKey: string) => void;
   onRemove?: (provider: string) => void;
   saving?: boolean;
+  /** Fetched models per BYOK provider id. Only present for configured BYOK providers — its absence for a given id is what keeps CLI providers dropdown-free. */
+  models?: Record<string, ModelOption[]>;
+  onModelChange?: (provider: string, model: string) => void;
 }
 
-export function ProviderSettings({ all, configured, onSave, onRemove, saving }: ProviderSettingsProps): JSX.Element {
+export function ProviderSettings({
+  all,
+  configured,
+  onSave,
+  onRemove,
+  saving,
+  models,
+  onModelChange,
+}: ProviderSettingsProps): JSX.Element {
   const form = useForm({
     defaultValues: { provider: all[0]?.id ?? "", apiKey: "" },
     onSubmit: ({ value }) => onSave(value.provider, value.apiKey),
@@ -24,6 +41,21 @@ export function ProviderSettings({ all, configured, onSave, onRemove, saving }: 
             {configured.includes(p.id) ? (
               <span className="flex items-center gap-2">
                 <span className="badge badge-success badge-sm">configured</span>
+                {models?.[p.id] && models[p.id].length > 0 && (
+                  <label className="form-control">
+                    <span className="sr-only">{p.label} model</span>
+                    <select
+                      aria-label={`${p.id} model`}
+                      className="select select-bordered select-xs"
+                      defaultValue={models[p.id][0].id}
+                      onChange={(e) => onModelChange?.(p.id, e.target.value)}
+                    >
+                      {models[p.id].map((m) => (
+                        <option key={m.id} value={m.id}>{m.displayName ?? m.id}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {onRemove && <button className="btn btn-ghost btn-xs" onClick={() => onRemove(p.id)}>Remove</button>}
               </span>
             ) : (

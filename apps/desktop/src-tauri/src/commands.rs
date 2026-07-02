@@ -1,18 +1,17 @@
 //! Tauri commands the frontend invokes. Thin glue over `db` + `agent`.
 
-use std::sync::Arc;
-
-use crate::agent::{AnthropicAgent, ChatAgent, ClaudeCodeAgent, Provider, offerable_providers};
+use crate::agent::{ChannelSink, is_known_provider, offerable_providers, resolve_agent};
 use crate::db::Db;
 use manch_dto::{
     CreateSchedule, CreateTeam, CreateWorkspace, CrossVerify, Report, RunStep, Schedule, SearchHit,
     StreamEvent, Team, TeamRun, Workspace,
 };
+use manch_protocol::Context;
 use tauri::{State, ipc::Channel};
 
 #[tauri::command]
 pub fn save_api_key(state: State<Db>, provider: String, api_key: String) -> Result<(), String> {
-    if Provider::from_id(&provider).is_none() {
+    if !is_known_provider(&provider) {
         return Err(format!("unknown provider: {provider}"));
     }
     state
@@ -26,13 +25,27 @@ pub fn list_configured_providers(state: State<Db>) -> Result<Vec<String>, String
     Ok(offerable_providers(saved))
 }
 
-/// `EventSink` that forwards each event over a Tauri IPC channel to the frontend.
-struct ChannelSink(Channel<StreamEvent>);
-impl crate::agent::EventSink for ChannelSink {
-    fn emit(&self, event: StreamEvent) {
-        // A closed channel (window gone) is not actionable here.
-        let _ = self.0.send(event);
-    }
+/// Fetch selectable models for a BYOK provider (needs a saved key).
+#[tauri::command]
+pub async fn list_models(
+    state: State<'_, Db>,
+    provider: String,
+) -> Result<Vec<manch_llm::ModelInfo>, String> {
+    let key = state
+        .get_key(&provider)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no API key saved for {provider}"))?;
+    manch_llm::list_models(&provider, &key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Persist the user's chosen model for a provider.
+#[tauri::command]
+pub fn set_model(state: State<Db>, provider: String, model: String) -> Result<(), String> {
+    state
+        .set_model(&provider, &model)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -42,25 +55,21 @@ pub async fn send_prompt_stream(
     text: String,
     channel: Channel<StreamEvent>,
 ) -> Result<(), String> {
-    let prov =
-        Provider::from_id(&provider).ok_or_else(|| format!("unknown provider: {provider}"))?;
-    // Resolve owned keys here; the mutex guard is released inside `get_key`,
-    // never held across the network/subprocess await below.
-    let agent: Box<dyn ChatAgent> = match prov {
-        Provider::Anthropic => {
-            let key = state
-                .get_key("anthropic")
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "no API key saved for anthropic".to_string())?;
-            Box::new(AnthropicAgent::new(key))
-        }
-        Provider::ClaudeCode => {
-            let key = state.get_key("claude-code").map_err(|e| e.to_string())?;
-            Box::new(ClaudeCodeAgent::new(key))
-        }
+    let agent = resolve_agent(&provider, &state)?;
+    let ctx = Context {
+        session_id: "desktop".to_string(),
+        blocks: vec![manch_protocol::acp::ContentBlock::Text(
+            manch_protocol::acp::TextContent::new(text),
+        )],
     };
-    let sink: Arc<dyn crate::agent::EventSink> = Arc::new(ChannelSink(channel));
-    agent.stream(&text, sink).await
+    let sink = ChannelSink(channel);
+    match agent.prompt(ctx, &[], &sink).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            sink.send_error(e.to_string());
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]

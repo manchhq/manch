@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../lib/api";
 import type { Provider } from "../lib/providers";
 import type { CreateWorkspace, CreateTeam, CreateSchedule } from "./bindings";
@@ -12,6 +12,27 @@ export function useSaveApiKey() {
     mutationFn: ({ provider, apiKey }: { provider: Provider; apiKey: string }) =>
       api.saveApiKey(provider, apiKey),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+const modelsQueryKey = (provider: Provider) => ["models", provider] as const;
+
+/**
+ * Models for however many BYOK providers currently have a saved key.
+ * `providerIds` is expected to already be filtered to BYOK providers (see
+ * `isByokProvider`/`BYOK_PROVIDERS` in `lib/providers.ts`) — its length can
+ * vary across renders, so this uses `useQueries` (rather than mapping a
+ * single-provider hook in a loop) to stay Rules-of-Hooks safe.
+ */
+export function useModelsForProviders(providerIds: Provider[]) {
+  return useQueries({
+    queries: providerIds.map((id) => ({ queryKey: modelsQueryKey(id), queryFn: () => api.listModels(id) })),
+  });
+}
+
+export function useSetModel() {
+  return useMutation({
+    mutationFn: ({ provider, model }: { provider: Provider; model: string }) => api.setModel(provider, model),
   });
 }
 

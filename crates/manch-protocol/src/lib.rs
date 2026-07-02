@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 pub mod acp {
     pub use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification,
-        SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-        ToolCallUpdateFields, ToolKind,
+        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 }
 
@@ -89,6 +89,17 @@ pub enum AgentEvent {
     ToolCall(ToolCall),
     /// The turn finished.
     Done(StopReason),
+}
+
+impl AgentEvent {
+    /// Convenience: an agent message text chunk in ACP vocabulary. The one place
+    /// BYOK and ACP agents construct streamed text, so the ACP wrapping lives here.
+    pub fn text_chunk(text: impl Into<String>) -> AgentEvent {
+        use acp::{ContentChunk, TextContent};
+        AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new(text.into())),
+        )))
+    }
 }
 
 /// Receives [`AgentEvent`]s as a turn streams. Implemented by the runtime; passed
@@ -186,4 +197,22 @@ pub trait PromptHandler: Send + Sync {
         message: Vec<ContentBlock>,
         sink: &dyn EventSink,
     ) -> Result<StopReason>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acp::SessionUpdate;
+
+    #[test]
+    fn text_chunk_wraps_delta_as_agent_message_chunk() {
+        let ev = AgentEvent::text_chunk("New Delhi");
+        match ev {
+            AgentEvent::Update(SessionUpdate::AgentMessageChunk(chunk)) => match chunk.content {
+                acp::ContentBlock::Text(t) => assert_eq!(t.text, "New Delhi"),
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected AgentMessageChunk update"),
+        }
+    }
 }

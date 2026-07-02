@@ -75,6 +75,13 @@ impl Db {
             [],
         )?;
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS provider_models (
+                 provider TEXT PRIMARY KEY,
+                 model    TEXT NOT NULL
+             )",
+            [],
+        )?;
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS workspaces (
                  id          TEXT PRIMARY KEY,
                  name        TEXT NOT NULL,
@@ -188,6 +195,28 @@ impl Db {
             "SELECT api_key FROM provider_keys WHERE provider = ?1",
             [provider],
             |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Insert or replace the model for a provider.
+    pub fn set_model(&self, provider: &str, model: &str) -> rusqlite::Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO provider_models (provider, model) VALUES (?1, ?2)
+             ON CONFLICT(provider) DO UPDATE SET model = excluded.model",
+            rusqlite::params![provider, model],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch the stored model for a provider, if any.
+    pub fn get_model(&self, provider: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.0.lock().unwrap();
+        conn.query_row(
+            "SELECT model FROM provider_models WHERE provider = ?1",
+            rusqlite::params![provider],
+            |r| r.get(0),
         )
         .optional()
     }
@@ -453,5 +482,21 @@ mod tests {
         let got = db.get_team(&team.id).unwrap().unwrap();
         assert_eq!(got.name, "Discovery");
         assert_eq!(db.list_teams(&ws.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn model_round_trips_per_provider() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.get_model("anthropic").unwrap(), None);
+        db.set_model("anthropic", "claude-opus-4-8").unwrap();
+        db.set_model("gemini", "gemini-3-flash").unwrap();
+        assert_eq!(
+            db.get_model("anthropic").unwrap().as_deref(),
+            Some("claude-opus-4-8")
+        );
+        assert_eq!(
+            db.get_model("gemini").unwrap().as_deref(),
+            Some("gemini-3-flash")
+        );
     }
 }
