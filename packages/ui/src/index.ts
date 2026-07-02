@@ -27,7 +27,7 @@ export type { WorkspaceOption, WorkspaceSwitcherProps } from "./stage/WorkspaceS
 export { ThemePicker } from "./settings/ThemePicker";
 export type { ThemePickerProps } from "./settings/ThemePicker";
 export { ProviderSettings } from "./settings/ProviderSettings";
-export type { ProviderSettingsProps } from "./settings/ProviderSettings";
+export type { ProviderSettingsProps, ModelOption } from "./settings/ProviderSettings";
 export { WorkspaceSettings } from "./settings/WorkspaceSettings";
 export type { WorkspaceSettingsProps } from "./settings/WorkspaceSettings";
 export { SettingsView } from "./settings/SettingsView";

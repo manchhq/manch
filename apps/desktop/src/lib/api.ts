@@ -2,10 +2,22 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Provider } from "./providers";
 import type { Workspace, CreateWorkspace, Team, CreateTeam, TeamRun, Schedule, CreateSchedule, SearchHit, CrossVerify } from "../data/bindings";
 
+/**
+ * A model advertised by a BYOK provider's list-models endpoint
+ * (`manch_llm::ModelInfo`). Not a ts-rs DTO — it's a plain command result, so
+ * the shape is typed here by hand rather than generated into `bindings.ts`.
+ */
+export interface ModelInfo {
+  id: string;
+  display_name: string | null;
+}
+
 export const saveApiKey = (provider: Provider, apiKey: string): Promise<void> =>
   invoke("save_api_key", { provider, apiKey });
 export const listConfiguredProviders = (): Promise<Provider[]> => invoke("list_configured_providers");
 export const sendPrompt = (provider: Provider, text: string): Promise<string> => invoke("send_prompt", { provider, text });
+export const listModels = (provider: Provider): Promise<ModelInfo[]> => invoke("list_models", { provider });
+export const setModel = (provider: Provider, model: string): Promise<void> => invoke("set_model", { provider, model });
 
 export const listWorkspaces = (): Promise<Workspace[]> => invoke("list_workspaces");
 export const createWorkspace = (input: CreateWorkspace): Promise<Workspace> => invoke("create_workspace", { input });

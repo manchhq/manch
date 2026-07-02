@@ -21,4 +21,48 @@ describe("ProviderSettings", () => {
     await screen.findByRole("button", { name: /save key/i });
     expect(onSave).toHaveBeenCalledWith("anthropic", "sk-test");
   });
+
+  it("renders a model dropdown for a configured BYOK provider and reports changes", () => {
+    const onModelChange = vi.fn();
+    const models = {
+      anthropic: [
+        { id: "claude-opus-4-8", displayName: "Claude Opus 4.8" },
+        { id: "claude-sonnet-5", displayName: "Claude Sonnet 5" },
+      ],
+    };
+    render(
+      <ProviderSettings
+        all={all}
+        configured={["anthropic"]}
+        onSave={() => {}}
+        models={models}
+        onModelChange={onModelChange}
+      />,
+    );
+    const select = screen.getByLabelText(/anthropic model/i);
+    expect(screen.getByRole("option", { name: "Claude Opus 4.8" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Claude Sonnet 5" })).toBeTruthy();
+    fireEvent.change(select, { target: { value: "claude-sonnet-5" } });
+    expect(onModelChange).toHaveBeenCalledWith("anthropic", "claude-sonnet-5");
+  });
+
+  it("falls back to a single-option select when only one model is available", () => {
+    render(
+      <ProviderSettings
+        all={all}
+        configured={["anthropic"]}
+        onSave={() => {}}
+        models={{ anthropic: [{ id: "only-model", displayName: null }] }}
+        onModelChange={() => {}}
+      />,
+    );
+    const select = screen.getByLabelText(/anthropic model/i) as HTMLSelectElement;
+    expect(select.options.length).toBe(1);
+    expect(screen.getByRole("option", { name: "only-model" })).toBeTruthy();
+  });
+
+  it("does not render a model dropdown for a CLI provider (no models entry)", () => {
+    render(<ProviderSettings all={all} configured={["claude-code"]} onSave={() => {}} models={{}} />);
+    expect(screen.queryByLabelText(/claude-code model/i)).toBeNull();
+  });
 });
