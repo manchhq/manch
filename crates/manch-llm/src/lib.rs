@@ -14,6 +14,11 @@ pub mod gemini;
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiAgent;
 
+#[cfg(feature = "openai")]
+pub mod openai;
+#[cfg(feature = "openai")]
+pub use openai::OpenAiAgent;
+
 /// A model advertised by a provider's list-models endpoint.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelInfo {
@@ -77,6 +82,20 @@ pub(crate) fn err(e: impl ToString) -> manch_protocol::Error {
     manch_protocol::Error::Other(e.to_string())
 }
 
+/// Fetch selectable models for a BYOK provider id. Unknown / disabled providers
+/// yield `NotFound`. Each provider degrades to its fallback model on fetch failure.
+pub async fn list_models(provider: &str, api_key: &str) -> manch_protocol::Result<Vec<ModelInfo>> {
+    match provider {
+        #[cfg(feature = "anthropic")]
+        "anthropic" => anthropic::list_models(api_key).await,
+        #[cfg(feature = "gemini")]
+        "gemini" => gemini::list_models(api_key).await,
+        #[cfg(feature = "openai")]
+        "openai" => openai::list_models(api_key).await,
+        _ => Err(manch_protocol::Error::NotFound(provider.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +121,11 @@ mod tests {
             ],
         };
         assert_eq!(prompt_text(&ctx), "hello\nworld");
+    }
+
+    #[tokio::test]
+    async fn list_models_rejects_unknown_provider() {
+        let e = super::list_models("nope", "k").await.unwrap_err();
+        assert!(matches!(e, manch_protocol::Error::NotFound(_)));
     }
 }
