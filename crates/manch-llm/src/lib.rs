@@ -9,6 +9,11 @@ pub mod anthropic;
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicAgent;
 
+#[cfg(feature = "gemini")]
+pub mod gemini;
+#[cfg(feature = "gemini")]
+pub use gemini::GeminiAgent;
+
 /// A model advertised by a provider's list-models endpoint.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelInfo {
