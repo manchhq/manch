@@ -4,6 +4,11 @@
 use manch_protocol::Context;
 use manch_protocol::acp::ContentBlock;
 
+#[cfg(feature = "anthropic")]
+pub mod anthropic;
+#[cfg(feature = "anthropic")]
+pub use anthropic::AnthropicAgent;
+
 /// A model advertised by a provider's list-models endpoint.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelInfo {
@@ -30,10 +35,10 @@ pub(crate) fn drain_sse(
         let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
         let line = String::from_utf8_lossy(&line_bytes);
         let line = line.trim();
-        if let Some(data) = line.strip_prefix("data:") {
-            if let Some(item) = parse(data.trim()) {
-                out.push(item);
-            }
+        if let Some(data) = line.strip_prefix("data:")
+            && let Some(item) = parse(data.trim())
+        {
+            out.push(item);
         }
     }
     out
