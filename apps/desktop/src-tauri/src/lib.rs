@@ -22,6 +22,7 @@ pub fn run() {
             commands::list_configured_providers,
             commands::list_models,
             commands::set_model,
+            commands::get_model,
             commands::send_prompt_stream,
             commands::list_workspaces,
             commands::create_workspace,

@@ -69,6 +69,24 @@ describe("SettingsPage", () => {
     );
   });
 
+  it("defaults the dropdown to the persisted model from get_model", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_configured_providers") return Promise.resolve(["anthropic"]);
+      if (cmd === "list_models") {
+        return Promise.resolve([
+          { id: "claude-opus-4-8", display_name: "Claude Opus 4.8" },
+          { id: "claude-sonnet-5", display_name: "Claude Sonnet 5" },
+        ]);
+      }
+      if (cmd === "get_model") return Promise.resolve("claude-sonnet-5");
+      return Promise.resolve([]);
+    });
+    render(wrap(<SettingsPage />));
+    const select = (await screen.findByLabelText(/anthropic model/i)) as HTMLSelectElement;
+    expect(invoke).toHaveBeenCalledWith("get_model", { provider: "anthropic" });
+    await waitFor(() => expect(select.value).toBe("claude-sonnet-5"));
+  });
+
   it("fetches and renders a model dropdown for a configured gemini BYOK provider", async () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_configured_providers") return Promise.resolve(["gemini"]);

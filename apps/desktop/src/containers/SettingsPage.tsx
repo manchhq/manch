@@ -7,6 +7,7 @@ import {
   useConfiguredProviders,
   useSaveApiKey,
   useModelsForProviders,
+  useSavedModelsForProviders,
   useSetModel,
   useWorkspaces,
   useRenameWorkspace,
@@ -23,12 +24,16 @@ export default function SettingsPage() {
 
   const byokConfigured = (providers.data ?? []).filter(isByokProvider);
   const modelQueries = useModelsForProviders(byokConfigured);
+  const savedModelQueries = useSavedModelsForProviders(byokConfigured);
   const setModel = useSetModel();
 
   const models: Record<string, ModelOption[]> = {};
+  const selectedModels: Record<string, string> = {};
   byokConfigured.forEach((provider, i) => {
     const data = modelQueries[i]?.data;
     if (data) models[provider] = data.map((m) => ({ id: m.id, displayName: m.display_name }));
+    const saved = savedModelQueries[i]?.data;
+    if (typeof saved === "string") selectedModels[provider] = saved;
   });
 
   return (
@@ -40,6 +45,7 @@ export default function SettingsPage() {
           saving={save.isPending}
           onSave={(provider, apiKey) => save.mutate({ provider: provider as Provider, apiKey })}
           models={models}
+          selectedModels={selectedModels}
           onModelChange={(provider, model) => setModel.mutate({ provider: provider as Provider, model })}
         />
       }

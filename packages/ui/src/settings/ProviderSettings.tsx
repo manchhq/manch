@@ -15,6 +15,8 @@ export interface ProviderSettingsProps {
   saving?: boolean;
   /** Fetched models per BYOK provider id. Only present for configured BYOK providers — its absence for a given id is what keeps CLI providers dropdown-free. */
   models?: Record<string, ModelOption[]>;
+  /** Persisted model choice per provider id. Drives the dropdown's initial value so it reflects the saved model, not just the first listed. */
+  selectedModels?: Record<string, string>;
   onModelChange?: (provider: string, model: string) => void;
 }
 
@@ -25,6 +27,7 @@ export function ProviderSettings({
   onRemove,
   saving,
   models,
+  selectedModels,
   onModelChange,
 }: ProviderSettingsProps): JSX.Element {
   const form = useForm({
@@ -44,10 +47,13 @@ export function ProviderSettings({
                 {models?.[p.id] && models[p.id].length > 0 && (
                   <label className="form-control">
                     <span className="sr-only">{p.label} model</span>
+                    {/* `key` re-inits this uncontrolled <select> once the saved
+                        choice loads async, so `defaultValue` takes effect. */}
                     <select
+                      key={selectedModels?.[p.id] ?? models[p.id][0].id}
                       aria-label={`${p.id} model`}
                       className="select select-bordered select-xs"
-                      defaultValue={models[p.id][0].id}
+                      defaultValue={selectedModels?.[p.id] ?? models[p.id][0].id}
                       onChange={(e) => onModelChange?.(p.id, e.target.value)}
                     >
                       {models[p.id].map((m) => (

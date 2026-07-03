@@ -11,7 +11,9 @@ use crate::{ModelInfo, SseItem, drain_sse, ensure_crypto_provider, err, prompt_t
 
 const URL: &str = "https://api.openai.com/v1/chat/completions";
 const MODELS_URL: &str = "https://api.openai.com/v1/models";
-pub(crate) const FALLBACK_MODEL: &str = "gpt-5"; // confirm current default at impl time
+// Stable chat alias — resolves to the current GPT-5 chat snapshot and works with
+// Chat Completions, so it won't rot like a pinned id. Only hit if list-models fails.
+pub(crate) const FALLBACK_MODEL: &str = "gpt-5-chat-latest";
 
 pub struct OpenAiAgent {
     api_key: String,
@@ -64,14 +66,43 @@ pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| {
-                    Some(ModelInfo {
-                        id: m.get("id")?.as_str()?.to_string(),
+                    let id = m.get("id")?.as_str()?;
+                    is_chat_model(id).then(|| ModelInfo {
+                        id: id.to_string(),
                         display_name: None,
                     })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `/v1/models` returns every model with no capability field — embeddings, TTS,
+/// image, transcription, moderation — any of which errors if picked for chat.
+/// OpenAI has no machine-readable "is chat" flag, so this is a curated id
+/// heuristic: keep the `gpt-*`/`chatgpt-*`/`o1|o3|o4` reasoning + chat families,
+/// drop everything whose id names a non-chat modality. Revisit when the model
+/// lineup shifts.
+fn is_chat_model(id: &str) -> bool {
+    const NON_CHAT: [&str; 9] = [
+        "embedding",
+        "tts",
+        "whisper",
+        "audio",
+        "transcribe",
+        "dall-e",
+        "image",
+        "moderation",
+        "realtime",
+    ];
+    if NON_CHAT.iter().any(|marker| id.contains(marker)) {
+        return false;
+    }
+    id.starts_with("gpt-")
+        || id.starts_with("chatgpt")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
 }
 
 fn fallback_model() -> ModelInfo {
@@ -182,5 +213,26 @@ mod tests {
         let models = parse_models(&body);
         assert_eq!(models[0].id, "gpt-5");
         assert_eq!(models[1].id, "o4-mini");
+    }
+
+    #[test]
+    fn parse_models_curates_out_non_chat_models() {
+        let body = serde_json::json!({ "data": [
+            { "id": "gpt-5" },
+            { "id": "text-embedding-3-large" },
+            { "id": "dall-e-3" },
+            { "id": "whisper-1" },
+            { "id": "gpt-4o-transcribe" },
+            { "id": "o3-mini" },
+            { "id": "omni-moderation-latest" },
+        ] });
+        let ids: Vec<_> = parse_models(&body).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["gpt-5", "o3-mini"]);
+    }
+
+    #[test]
+    fn new_uses_fallback_when_model_none() {
+        let a = OpenAiAgent::new("k".into(), None);
+        assert_eq!(a.model, FALLBACK_MODEL);
     }
 }

@@ -46,6 +46,26 @@ describe("ProviderSettings", () => {
     expect(onModelChange).toHaveBeenCalledWith("anthropic", "claude-sonnet-5");
   });
 
+  it("defaults the dropdown to the persisted model, not the first listed", () => {
+    render(
+      <ProviderSettings
+        all={all}
+        configured={["anthropic"]}
+        onSave={() => {}}
+        models={{
+          anthropic: [
+            { id: "claude-opus-4-8", displayName: "Claude Opus 4.8" },
+            { id: "claude-sonnet-5", displayName: "Claude Sonnet 5" },
+          ],
+        }}
+        selectedModels={{ anthropic: "claude-sonnet-5" }}
+        onModelChange={() => {}}
+      />,
+    );
+    const select = screen.getByLabelText(/anthropic model/i) as HTMLSelectElement;
+    expect(select.value).toBe("claude-sonnet-5");
+  });
+
   it("falls back to a single-option select when only one model is available", () => {
     render(
       <ProviderSettings

@@ -18,6 +18,7 @@ export const listConfiguredProviders = (): Promise<Provider[]> => invoke("list_c
 export const sendPrompt = (provider: Provider, text: string): Promise<string> => invoke("send_prompt", { provider, text });
 export const listModels = (provider: Provider): Promise<ModelInfo[]> => invoke("list_models", { provider });
 export const setModel = (provider: Provider, model: string): Promise<void> => invoke("set_model", { provider, model });
+export const getModel = (provider: Provider): Promise<string | null> => invoke("get_model", { provider });
 
 export const listWorkspaces = (): Promise<Workspace[]> => invoke("list_workspaces");
 export const createWorkspace = (input: CreateWorkspace): Promise<Workspace> => invoke("create_workspace", { input });

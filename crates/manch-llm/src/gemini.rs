@@ -55,12 +55,15 @@ pub(crate) fn parse_line(data: &str) -> Option<SseItem> {
     (!text.is_empty()).then_some(SseItem::Text(text))
 }
 
-/// Parse list-models response; ids drop the `models/` prefix. Pure.
+/// Parse list-models response; ids drop the `models/` prefix. Only models that
+/// advertise `streamGenerateContent` are kept — the raw list also contains
+/// embedding/TTS/embedContent-only models that error at prompt time. Pure.
 pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
     body.get("models")
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter()
+                .filter(|m| supports_streaming(m))
                 .filter_map(|m| {
                     let name = m.get("name")?.as_str()?;
                     Some(ModelInfo {
@@ -74,6 +77,19 @@ pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// True if a list-models entry advertises `streamGenerateContent` — i.e. it's a
+/// chat model this provider can actually prompt (excludes embedding/TTS models).
+fn supports_streaming(model: &serde_json::Value) -> bool {
+    model
+        .get("supportedGenerationMethods")
+        .and_then(|m| m.as_array())
+        .is_some_and(|methods| {
+            methods
+                .iter()
+                .any(|m| m.as_str() == Some("streamGenerateContent"))
+        })
 }
 
 fn fallback_model() -> ModelInfo {
@@ -182,10 +198,39 @@ mod tests {
     #[test]
     fn parse_models_strips_models_prefix() {
         let body = serde_json::json!({
-            "models": [{ "name": "models/gemini-3-flash", "displayName": "Gemini 3 Flash" }]
+            "models": [{
+                "name": "models/gemini-3-flash",
+                "displayName": "Gemini 3 Flash",
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]
+            }]
         });
         let models = parse_models(&body);
         assert_eq!(models[0].id, "gemini-3-flash");
         assert_eq!(models[0].display_name.as_deref(), Some("Gemini 3 Flash"));
+    }
+
+    #[test]
+    fn parse_models_drops_non_streaming_models() {
+        let body = serde_json::json!({
+            "models": [
+                {
+                    "name": "models/gemini-3-flash",
+                    "supportedGenerationMethods": ["streamGenerateContent"]
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                { "name": "models/legacy-no-methods" }
+            ]
+        });
+        let ids: Vec<_> = parse_models(&body).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["gemini-3-flash"]);
+    }
+
+    #[test]
+    fn new_uses_fallback_when_model_none() {
+        let g = GeminiAgent::new("k".into(), None);
+        assert_eq!(g.model, FALLBACK_MODEL);
     }
 }
