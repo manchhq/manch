@@ -76,12 +76,6 @@ impl PromptHandler for Manch {
 
         let schemas: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
 
-        // Task 3 interim: both arms below return unconditionally, so the loop
-        // never actually iterates yet — clippy flags that correctly. Task 4
-        // makes the "calls non-empty" arm `continue` after dispatch instead of
-        // returning, so the loop becomes real; until then this is intentional
-        // scaffolding, not a bug, so it's allowed rather than restructured.
-        #[allow(clippy::never_loop)]
         for _ in 0..MAX_TOOL_ITERS {
             let ctx = self.memory.assemble_context(session_id).await?;
             let intercept = Arc::new(InterceptSink::new(sink.clone()));
@@ -93,14 +87,41 @@ impl PromptHandler for Manch {
                 return Ok(stop);
             }
 
-            // Task 4 fills in dispatch here; until then, a captured call would
-            // loop with no progress, so treat "no dispatch implemented" as done.
-            sink.emit(AgentEvent::Done(stop)).await?;
-            return Ok(stop);
+            for tc in calls {
+                // Provisional host-tool convention: the tool name is the ACP
+                // ToolCall's `title`, args are `raw_input`. (Unexercised by #5;
+                // no BYOK agent emits ToolCall yet. See the spec.)
+                let tool = self
+                    .tools
+                    .get(&tc.title)
+                    .ok_or_else(|| Error::NotFound(tc.title.clone()))?;
+                let args = tc.raw_input.clone().unwrap_or(serde_json::Value::Null);
+                let result = tool.call(args).await?;
+                self.memory
+                    .append(session_id, tool_result_block(&tc, result))
+                    .await?;
+            }
         }
 
         Err(Error::Other(format!(
             "tool-call loop exceeded {MAX_TOOL_ITERS} iterations"
         )))
+    }
+}
+
+/// Turn a tool result into a `ContentBlock` for the next turn's context. A
+/// standard content result unwraps to its block; diff/terminal results (which a
+/// re-prompt can't consume directly) become a short text placeholder.
+fn tool_result_block(
+    tc: &manch_protocol::acp::ToolCall,
+    result: manch_protocol::acp::ToolCallContent,
+) -> ContentBlock {
+    use manch_protocol::acp::{TextContent, ToolCallContent};
+    match result {
+        ToolCallContent::Content(c) => c.content,
+        _ => ContentBlock::Text(TextContent::new(format!(
+            "[tool {} returned a non-content result]",
+            tc.title
+        ))),
     }
 }

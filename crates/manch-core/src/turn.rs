@@ -45,7 +45,7 @@ mod tests {
     use std::sync::Arc;
 
     use manch_protocol::PromptHandler;
-    use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
+    use manch_protocol::acp::{ContentBlock, StopReason, TextContent, ToolCall};
     use manch_protocol::{AgentEvent, Error};
 
     use crate::Manch;
@@ -53,6 +53,13 @@ mod tests {
 
     fn user_msg(text: &str) -> Vec<ContentBlock> {
         vec![ContentBlock::Text(TextContent::new(text.to_string()))]
+    }
+
+    /// Build an `AgentEvent::ToolCall` addressed to a registered tool by name.
+    fn tool_call(name: &str) -> AgentEvent {
+        let mut tc = ToolCall::new(format!("call-{name}"), name.to_string());
+        tc.raw_input = Some(serde_json::json!({ "x": 1 }));
+        AgentEvent::ToolCall(tc)
     }
 
     #[tokio::test]
@@ -108,5 +115,102 @@ mod tests {
         assert!(matches!(evs.last(), Some(AgentEvent::Done(_))));
         // the inbound user message was appended to memory.
         assert_eq!(store.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_call_is_dispatched_then_reprompted() {
+        use crate::testing::EchoTool;
+        let echo = EchoTool::new("echo");
+        let calls = echo.calls.clone();
+        // turn 1: emit a tool call. turn 2: finish with text + Done.
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![tool_call("echo")],
+                vec![
+                    AgentEvent::text_chunk("done"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(VecStore::new());
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(echo))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+
+        manch
+            .handle("a", "s", user_msg("hi"), sink.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), 1); // tool ran once
+        let evs = sink.events();
+        // caller never sees a raw ToolCall event; sees the turn-2 text + one Done.
+        assert!(!evs.iter().any(|e| matches!(e, AgentEvent::ToolCall(_))));
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, AgentEvent::Done(_)))
+                .count(),
+            1
+        );
+        // memory: user msg + tool result appended.
+        assert_eq!(store.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_not_found() {
+        let agent = ScriptAgent::new("a", vec![vec![tool_call("ghost")]]);
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .memory(Arc::new(VecStore::new()))
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+        let err = manch
+            .handle("a", "s", user_msg("hi"), sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound(name) if name == "ghost"));
+    }
+
+    #[tokio::test]
+    async fn failing_tool_propagates_and_stops() {
+        use crate::testing::FailTool;
+        let agent = ScriptAgent::new("a", vec![vec![tool_call("boom")]]);
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(FailTool::new("boom")))
+            .memory(Arc::new(VecStore::new()))
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+        let err = manch
+            .handle("a", "s", user_msg("hi"), sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn endless_tool_calls_hit_the_iteration_cap() {
+        use crate::testing::EchoTool;
+        // every turn emits a tool call → never terminates on its own.
+        let turns: Vec<Vec<AgentEvent>> = (0..32).map(|_| vec![tool_call("echo")]).collect();
+        let manch = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new("a", turns)))
+            .tool(Arc::new(EchoTool::new("echo")))
+            .memory(Arc::new(VecStore::new()))
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+        let err = manch
+            .handle("a", "s", user_msg("hi"), sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Other(msg) if msg.contains("exceeded")));
     }
 }
