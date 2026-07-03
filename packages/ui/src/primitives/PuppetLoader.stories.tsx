@@ -5,6 +5,7 @@ const meta: Meta<typeof PuppetLoader> = { title: "primitives/PuppetLoader", comp
 export default meta;
 type Story = StoryObj<typeof PuppetLoader>;
 
-export const Default: Story = {};
-export const WithLabel: Story = { args: { label: "Consulting the AIs…" } };
-export const Large: Story = { args: { size: 96, label: "Streaming" } };
+export const Male: Story = { args: { variant: "male", label: "Consulting the AIs…" } };
+export const Female: Story = { args: { variant: "female", label: "Consulting the AIs…" } };
+export const Large: Story = { args: { size: 96, variant: "male", label: "Streaming" } };
+export const WithLabel: Story = { args: { label: "Thinking…" } };
