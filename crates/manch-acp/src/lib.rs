@@ -1,5 +1,6 @@
 //! Framework-agnostic ACP host — one generic subprocess agent parameterized by a launch spec.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::ToolCallStatus;
@@ -121,7 +122,7 @@ impl Agent for AcpCliAgent {
         &self,
         ctx: Context,
         _tools: &[ToolSchema],
-        sink: &dyn EventSink,
+        sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         use std::collections::HashMap;
 
@@ -137,12 +138,20 @@ impl Agent for AcpCliAgent {
         let blocks = ctx.blocks.clone();
         let id = self.id;
 
-        // Buffer AgentEvents from the 'static sync notification handler; drain
-        // and async-emit them after the connection completes (emit is async).
-        let out: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        // The 'static notification handler owns a clone of the sink and emits
+        // live as events arrive — no post-turn buffering, so partial text
+        // survives a mid-turn error. `emitted` preserves the "no text" error.
+        // Mutex guards below are scoped and dropped *before* every `.await`
+        // (a std Mutex guard is not Send and must not cross an await point).
         let text_buf = Arc::new(Mutex::new(String::new()));
         let names: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
-        let (hout, htext, hnames) = (out.clone(), text_buf.clone(), names.clone());
+        let emitted = Arc::new(AtomicBool::new(false));
+        let (hsink, htext, hnames, hemitted) = (
+            sink.clone(),
+            text_buf.clone(),
+            names.clone(),
+            emitted.clone(),
+        );
 
         let stop = Client
             .builder()
@@ -153,8 +162,10 @@ impl Agent for AcpCliAgent {
                             content: ContentBlock::Text(t),
                             ..
                         }) => {
-                            if let Some(delta) = push_chunk(&mut htext.lock().unwrap(), &t.text) {
-                                hout.lock().unwrap().push(AgentEvent::text_chunk(delta));
+                            let delta = push_chunk(&mut htext.lock().unwrap(), &t.text);
+                            if let Some(delta) = delta {
+                                hemitted.store(true, Ordering::Relaxed);
+                                let _ = hsink.emit(AgentEvent::text_chunk(delta)).await;
                             }
                         }
                         SessionUpdate::ToolCall(tc) => {
@@ -162,9 +173,10 @@ impl Agent for AcpCliAgent {
                                 .lock()
                                 .unwrap()
                                 .insert(tc.tool_call_id.0.to_string(), tc.title.clone());
-                            hout.lock()
-                                .unwrap()
-                                .push(AgentEvent::Update(SessionUpdate::ToolCall(tc)));
+                            hemitted.store(true, Ordering::Relaxed);
+                            let _ = hsink
+                                .emit(AgentEvent::Update(SessionUpdate::ToolCall(tc)))
+                                .await;
                         }
                         SessionUpdate::ToolCallUpdate(mut u) => {
                             if u.fields.title.is_none() {
@@ -174,9 +186,10 @@ impl Agent for AcpCliAgent {
                                     .get(&u.tool_call_id.0.to_string())
                                     .cloned();
                             }
-                            hout.lock()
-                                .unwrap()
-                                .push(AgentEvent::Update(SessionUpdate::ToolCallUpdate(u)));
+                            hemitted.store(true, Ordering::Relaxed);
+                            let _ = hsink
+                                .emit(AgentEvent::Update(SessionUpdate::ToolCallUpdate(u)))
+                                .await;
                         }
                         _ => {}
                     }
@@ -219,12 +232,7 @@ impl Agent for AcpCliAgent {
             .await
             .map_err(err)?;
 
-        let events = std::mem::take(&mut *out.lock().unwrap());
-        let emitted = !events.is_empty();
-        for ev in events {
-            sink.emit(ev).await?;
-        }
-        if emitted {
+        if emitted.load(Ordering::Relaxed) {
             sink.emit(AgentEvent::Done(stop)).await?;
             Ok(stop)
         } else {

@@ -139,7 +139,7 @@ pub trait Agent: Send + Sync {
         &self,
         context: Context,
         tools: &[ToolSchema],
-        sink: &dyn EventSink,
+        sink: Arc<dyn EventSink>,
     ) -> Result<StopReason>;
 }
 
@@ -195,7 +195,7 @@ pub trait PromptHandler: Send + Sync {
         agent_id: &str,
         session_id: &str,
         message: Vec<ContentBlock>,
-        sink: &dyn EventSink,
+        sink: Arc<dyn EventSink>,
     ) -> Result<StopReason>;
 }
 

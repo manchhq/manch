@@ -42,35 +42,37 @@ impl ChannelSink {
     }
 }
 
+/// Pure `AgentEvent` → `StreamEvent` mapping. Returns `None` for events the UI
+/// stream doesn't surface (e.g. the BYOK-only `AgentEvent::ToolCall`). Kept free
+/// of the Tauri `Channel` so it can be unit-tested in isolation.
+pub fn map_event(event: AgentEvent) -> Option<StreamEvent> {
+    match event {
+        AgentEvent::Update(SessionUpdate::AgentMessageChunk(chunk)) => match chunk.content {
+            ContentBlock::Text(t) => Some(StreamEvent::Token { text: t.text }),
+            _ => None,
+        },
+        AgentEvent::Update(SessionUpdate::ToolCall(tc)) => Some(StreamEvent::Tool {
+            id: tc.tool_call_id.0.to_string(),
+            name: tc.title,
+            status: tool_status(tc.status).into(),
+            detail: None,
+        }),
+        AgentEvent::Update(SessionUpdate::ToolCallUpdate(u)) => Some(StreamEvent::Tool {
+            id: u.tool_call_id.0.to_string(),
+            name: u.fields.title.unwrap_or_default(),
+            status: u.fields.status.map(tool_status).unwrap_or("running").into(),
+            detail: None,
+        }),
+        AgentEvent::Done(_) => Some(StreamEvent::Done),
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl EventSink for ChannelSink {
     async fn emit(&self, event: AgentEvent) -> manch_protocol::Result<()> {
-        match event {
-            AgentEvent::Update(SessionUpdate::AgentMessageChunk(chunk)) => {
-                if let ContentBlock::Text(t) = chunk.content {
-                    let _ = self.0.send(StreamEvent::Token { text: t.text });
-                }
-            }
-            AgentEvent::Update(SessionUpdate::ToolCall(tc)) => {
-                let _ = self.0.send(StreamEvent::Tool {
-                    id: tc.tool_call_id.0.to_string(),
-                    name: tc.title,
-                    status: tool_status(tc.status).into(),
-                    detail: None,
-                });
-            }
-            AgentEvent::Update(SessionUpdate::ToolCallUpdate(u)) => {
-                let _ = self.0.send(StreamEvent::Tool {
-                    id: u.tool_call_id.0.to_string(),
-                    name: u.fields.title.unwrap_or_default(),
-                    status: u.fields.status.map(tool_status).unwrap_or("running").into(),
-                    detail: None,
-                });
-            }
-            AgentEvent::Done(_) => {
-                let _ = self.0.send(StreamEvent::Done);
-            }
-            _ => {}
+        if let Some(stream_event) = map_event(event) {
+            let _ = self.0.send(stream_event);
         }
         Ok(())
     }
@@ -130,5 +132,22 @@ mod tests {
         assert!(is_known_provider("gemini"));
         assert!(is_known_provider("codex"));
         assert!(!is_known_provider("nope"));
+    }
+
+    #[test]
+    fn maps_text_chunk_to_token() {
+        match map_event(AgentEvent::text_chunk("hello")) {
+            Some(StreamEvent::Token { text }) => assert_eq!(text, "hello"),
+            other => panic!("expected Token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_done_to_done() {
+        use manch_protocol::acp::StopReason;
+        assert!(matches!(
+            map_event(AgentEvent::Done(StopReason::EndTurn)),
+            Some(StreamEvent::Done)
+        ));
     }
 }
