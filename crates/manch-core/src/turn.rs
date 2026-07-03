@@ -35,7 +35,10 @@ impl EventSink for InterceptSink {
                 Ok(())
             }
             AgentEvent::Done(_) => Ok(()),
-            update => self.inner.emit(update).await,
+            // Explicit (not a catch-all) so that if `AgentEvent` grows a new
+            // variant, this match fails to compile instead of silently
+            // forwarding an unrecognized event to the caller as UI output.
+            AgentEvent::Update(u) => self.inner.emit(AgentEvent::Update(u)).await,
         }
     }
 }
@@ -193,6 +196,47 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Other(_)));
+    }
+
+    #[tokio::test]
+    async fn assistant_output_is_not_persisted_yet() {
+        // Documents a known gap (see spec "Known gaps"): core does not persist
+        // assistant turns. When assistant-persistence lands, this assertion
+        // changes.
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![
+                    AgentEvent::text_chunk("first reply"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+                vec![
+                    AgentEvent::text_chunk("second reply"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(VecStore::new());
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+
+        manch
+            .handle("a", "s", user_msg("first"), sink.clone())
+            .await
+            .unwrap();
+        manch
+            .handle("a", "s", user_msg("second"), sink.clone())
+            .await
+            .unwrap();
+
+        // Only the two USER message blocks made it into the store; neither
+        // "first reply" nor "second reply" (the agent's own streamed output)
+        // was ever appended.
+        assert_eq!(store.len(), 2);
     }
 
     #[tokio::test]

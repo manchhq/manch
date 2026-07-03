@@ -57,6 +57,18 @@ impl Manch {
 
 #[async_trait]
 impl PromptHandler for Manch {
+    // KNOWN GAP: this loop persists only inbound user blocks (below) and tool
+    // results (in the dispatch loop) to the `MemoryStore`. The agent's own
+    // streamed output — assistant text and the tool-call request itself — is
+    // forwarded live to the caller's `EventSink` but never written to memory.
+    // That's fine for the ACP-only #5 milestone (the external agent owns its
+    // own session/transcript), but it is inert, not correct, for anything that
+    // re-derives context from this store: a real SQLite `MemoryStore` (#3)
+    // would silently drop assistant turns from multi-turn history, and a BYOK
+    // re-prompt built from `assemble_context` would replay a `tool_result`
+    // with no preceding `tool_use` in the transcript. Persisting assistant
+    // turns (and the originating `ToolCall`) is deferred, not designed away —
+    // don't build on the assumption that memory already holds them.
     async fn handle(
         &self,
         agent_id: &str,
@@ -87,7 +99,11 @@ impl PromptHandler for Manch {
                 return Ok(stop);
             }
 
-            for tc in calls {
+            // Edge case (untested; only single-call turns are exercised today):
+            // if a turn emits multiple tool calls and a later one errors, the
+            // earlier results in this batch are already appended to memory
+            // before the `?` below propagates the error.
+            for mut tc in calls {
                 // Provisional host-tool convention: the tool name is the ACP
                 // ToolCall's `title`, args are `raw_input`. (Unexercised by #5;
                 // no BYOK agent emits ToolCall yet. See the spec.)
@@ -95,7 +111,7 @@ impl PromptHandler for Manch {
                     .tools
                     .get(&tc.title)
                     .ok_or_else(|| Error::NotFound(tc.title.clone()))?;
-                let args = tc.raw_input.clone().unwrap_or(serde_json::Value::Null);
+                let args = tc.raw_input.take().unwrap_or(serde_json::Value::Null);
                 let result = tool.call(args).await?;
                 self.memory
                     .append(session_id, tool_result_block(&tc, result))

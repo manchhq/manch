@@ -169,6 +169,22 @@ Tests:
 Gate: `just ci` green (new crate compiles under clippy `-D warnings`, rustfmt
 clean, tests pass).
 
+## Known gaps / deferred
+
+- **Assistant turns are not persisted.** `Manch::handle`'s loop appends only
+  inbound user message blocks and tool results to the `MemoryStore`; the
+  agent's own streamed output (assistant text, and the `ToolCall` request
+  itself) is forwarded live to the caller's `EventSink` but never written to
+  memory. This is inert for the ACP-only #5 milestone, since the external
+  agent owns its own session/transcript there. It is **not** inert once
+  anything re-derives context from this store: the real SQLite `MemoryStore`
+  (#3) would silently lose assistant turns across multi-turn history, and a
+  BYOK re-prompt built from `assemble_context` would send a `tool_result` with
+  no preceding `tool_use` in the transcript. Persisting assistant turns is
+  deferred, tracked by the `assistant_output_is_not_persisted_yet` test in
+  `turn.rs`, which pins the current (gap-having) behavior and is expected to
+  change once assistant-persistence lands.
+
 ## Out of scope / follow-ups
 
 - Real SQLite `MemoryStore` + smart context assembly — **#3**.
