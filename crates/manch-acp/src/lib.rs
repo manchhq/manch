@@ -135,7 +135,10 @@ impl Agent for AcpCliAgent {
         use agent_client_protocol::{self as acp, AcpAgent, Client, ConnectionTo};
 
         let agent = AcpAgent::from_args(self.argv()).map_err(err)?;
-        let blocks = ctx.blocks.clone();
+        // Isolate each session's ACP workspace by session id (was a single shared
+        // temp dir). `ctx` is owned, so the blocks move rather than clone.
+        let cwd = std::env::temp_dir().join(format!("manch-acp-{}", ctx.session_id));
+        let blocks = ctx.blocks;
         let id = self.id;
 
         // The 'static notification handler owns a clone of the sink and emits
@@ -217,7 +220,6 @@ impl Agent for AcpCliAgent {
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
-                let cwd = std::env::temp_dir().join("manch-acp-workspace");
                 std::fs::create_dir_all(&cwd).ok();
                 let session = connection
                     .send_request(NewSessionRequest::new(cwd))
