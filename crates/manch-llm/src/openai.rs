@@ -1,5 +1,7 @@
 //! BYOK OpenAI Chat Completions client (Codex BYOK path).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use manch_protocol::acp::StopReason;
@@ -110,7 +112,7 @@ impl Agent for OpenAiAgent {
         &self,
         ctx: Context,
         _tools: &[ToolSchema],
-        sink: &dyn EventSink,
+        sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         ensure_crypto_provider();
         let prompt = prompt_text(&ctx);

@@ -1,5 +1,7 @@
 //! Tauri commands the frontend invokes. Thin glue over `db` + `agent`.
 
+use std::sync::Arc;
+
 use crate::agent::{ChannelSink, is_known_provider, offerable_providers, resolve_agent};
 use crate::db::Db;
 use manch_dto::{
@@ -62,8 +64,8 @@ pub async fn send_prompt_stream(
             manch_protocol::acp::TextContent::new(text),
         )],
     };
-    let sink = ChannelSink(channel);
-    match agent.prompt(ctx, &[], &sink).await {
+    let sink = Arc::new(ChannelSink(channel));
+    match agent.prompt(ctx, &[], sink.clone()).await {
         Ok(_) => Ok(()),
         Err(e) => {
             sink.send_error(e.to_string());
