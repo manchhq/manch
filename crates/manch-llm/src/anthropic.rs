@@ -3,11 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use manch_protocol::acp::StopReason;
-use manch_protocol::{Agent, AgentEvent, Context, EventSink, Result, ToolSchema};
+use manch_protocol::{Agent, Context, EventSink, Result, ToolSchema};
 
-use crate::{ModelInfo, SseItem, drain_sse, ensure_crypto_provider, err, prompt_text};
+use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, prompt_text};
 
 const URL: &str = "https://api.anthropic.com/v1/messages";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
@@ -63,12 +62,6 @@ pub(crate) fn parse_line(data: &str) -> Option<SseItem> {
     }
 }
 
-/// Surface `error.message` from a non-stream error body. Pure.
-fn error_message(body: &serde_json::Value) -> Option<String> {
-    let msg = body.get("error")?.get("message")?.as_str()?;
-    Some(format!("anthropic: {msg}"))
-}
-
 /// Parse the list-models response into a catalog. Pure.
 pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
     body.get("data")
@@ -98,25 +91,7 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
         .header("anthropic-version", VERSION)
         .send()
         .await;
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await.map_err(err)?;
-            let models = parse_models(&body);
-            Ok(if models.is_empty() {
-                vec![fallback_model()]
-            } else {
-                models
-            })
-        }
-        _ => Ok(vec![fallback_model()]),
-    }
-}
-
-fn fallback_model() -> ModelInfo {
-    ModelInfo {
-        id: FALLBACK_MODEL.to_string(),
-        display_name: None,
-    }
+    crate::list_models_with(resp, FALLBACK_MODEL, parse_models).await
 }
 
 #[async_trait]
@@ -143,26 +118,9 @@ impl Agent for AnthropicAgent {
             .map_err(err)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body: serde_json::Value = resp.json().await.map_err(err)?;
-            return Err(crate::err(
-                error_message(&body).unwrap_or_else(|| format!("anthropic: HTTP {status}")),
-            ));
+            return Err(crate::http_error("anthropic", resp).await);
         }
-
-        let mut stream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            buf.extend_from_slice(&chunk.map_err(err)?);
-            for item in drain_sse(&mut buf, parse_line) {
-                match item {
-                    SseItem::Text(t) => sink.emit(AgentEvent::text_chunk(t)).await?,
-                    SseItem::Error(e) => return Err(crate::err(e)),
-                }
-            }
-        }
-        sink.emit(AgentEvent::Done(StopReason::EndTurn)).await?;
-        Ok(StopReason::EndTurn)
+        crate::stream_sse(resp, &sink, parse_line).await
     }
 }
 

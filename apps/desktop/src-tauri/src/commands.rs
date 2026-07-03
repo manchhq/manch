@@ -50,6 +50,13 @@ pub fn set_model(state: State<Db>, provider: String, model: String) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+/// Read back the persisted model for a provider (`None` if never chosen), so the
+/// UI can default its dropdown to the saved choice instead of the first listed.
+#[tauri::command]
+pub fn get_model(state: State<Db>, provider: String) -> Result<Option<String>, String> {
+    state.get_model(&provider).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn send_prompt_stream(
     state: State<'_, Db>,

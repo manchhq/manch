@@ -36,6 +36,19 @@ export function useSetModel() {
   });
 }
 
+const savedModelQueryKey = (provider: Provider) => ["savedModel", provider] as const;
+
+/**
+ * The persisted model choice for however many BYOK providers have a saved key,
+ * so the settings dropdown can default to the saved value rather than the first
+ * listed. Same variable-length `useQueries` shape as `useModelsForProviders`.
+ */
+export function useSavedModelsForProviders(providerIds: Provider[]) {
+  return useQueries({
+    queries: providerIds.map((id) => ({ queryKey: savedModelQueryKey(id), queryFn: () => api.getModel(id) })),
+  });
+}
+
 export function useWorkspaces() {
   return useQuery({ queryKey: ["workspaces"], queryFn: api.listWorkspaces });
 }

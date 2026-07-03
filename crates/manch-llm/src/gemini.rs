@@ -3,11 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use manch_protocol::acp::StopReason;
-use manch_protocol::{Agent, AgentEvent, Context, EventSink, Result, ToolSchema};
+use manch_protocol::{Agent, Context, EventSink, Result, ToolSchema};
 
-use crate::{ModelInfo, SseItem, drain_sse, ensure_crypto_provider, err, prompt_text};
+use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, prompt_text};
 
 const BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const FALLBACK_MODEL: &str = "gemini-3-flash";
@@ -55,12 +54,15 @@ pub(crate) fn parse_line(data: &str) -> Option<SseItem> {
     (!text.is_empty()).then_some(SseItem::Text(text))
 }
 
-/// Parse list-models response; ids drop the `models/` prefix. Pure.
+/// Parse list-models response; ids drop the `models/` prefix. Only models that
+/// advertise `streamGenerateContent` are kept — the raw list also contains
+/// embedding/TTS/embedContent-only models that error at prompt time. Pure.
 pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
     body.get("models")
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter()
+                .filter(|m| supports_streaming(m))
                 .filter_map(|m| {
                     let name = m.get("name")?.as_str()?;
                     Some(ModelInfo {
@@ -76,11 +78,17 @@ pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
         .unwrap_or_default()
 }
 
-fn fallback_model() -> ModelInfo {
-    ModelInfo {
-        id: FALLBACK_MODEL.to_string(),
-        display_name: None,
-    }
+/// True if a list-models entry advertises `streamGenerateContent` — i.e. it's a
+/// chat model this provider can actually prompt (excludes embedding/TTS models).
+fn supports_streaming(model: &serde_json::Value) -> bool {
+    model
+        .get("supportedGenerationMethods")
+        .and_then(|m| m.as_array())
+        .is_some_and(|methods| {
+            methods
+                .iter()
+                .any(|m| m.as_str() == Some("streamGenerateContent"))
+        })
 }
 
 pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
@@ -91,18 +99,7 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
         .header("x-goog-api-key", api_key)
         .send()
         .await;
-    match resp {
-        Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await.map_err(err)?;
-            let models = parse_models(&body);
-            Ok(if models.is_empty() {
-                vec![fallback_model()]
-            } else {
-                models
-            })
-        }
-        _ => Ok(vec![fallback_model()]),
-    }
+    crate::list_models_with(resp, FALLBACK_MODEL, parse_models).await
 }
 
 #[async_trait]
@@ -129,30 +126,9 @@ impl Agent for GeminiAgent {
             .map_err(err)?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body: serde_json::Value = resp.json().await.map_err(err)?;
-            let msg = body
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(|m| format!("gemini: {m}"))
-                .unwrap_or_else(|| format!("gemini: HTTP {status}"));
-            return Err(crate::err(msg));
+            return Err(crate::http_error("gemini", resp).await);
         }
-
-        let mut stream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            buf.extend_from_slice(&chunk.map_err(err)?);
-            for item in drain_sse(&mut buf, parse_line) {
-                match item {
-                    SseItem::Text(t) => sink.emit(AgentEvent::text_chunk(t)).await?,
-                    SseItem::Error(e) => return Err(crate::err(e)),
-                }
-            }
-        }
-        sink.emit(AgentEvent::Done(StopReason::EndTurn)).await?;
-        Ok(StopReason::EndTurn)
+        crate::stream_sse(resp, &sink, parse_line).await
     }
 }
 
@@ -182,10 +158,39 @@ mod tests {
     #[test]
     fn parse_models_strips_models_prefix() {
         let body = serde_json::json!({
-            "models": [{ "name": "models/gemini-3-flash", "displayName": "Gemini 3 Flash" }]
+            "models": [{
+                "name": "models/gemini-3-flash",
+                "displayName": "Gemini 3 Flash",
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]
+            }]
         });
         let models = parse_models(&body);
         assert_eq!(models[0].id, "gemini-3-flash");
         assert_eq!(models[0].display_name.as_deref(), Some("Gemini 3 Flash"));
+    }
+
+    #[test]
+    fn parse_models_drops_non_streaming_models() {
+        let body = serde_json::json!({
+            "models": [
+                {
+                    "name": "models/gemini-3-flash",
+                    "supportedGenerationMethods": ["streamGenerateContent"]
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                { "name": "models/legacy-no-methods" }
+            ]
+        });
+        let ids: Vec<_> = parse_models(&body).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["gemini-3-flash"]);
+    }
+
+    #[test]
+    fn new_uses_fallback_when_model_none() {
+        let g = GeminiAgent::new("k".into(), None);
+        assert_eq!(g.model, FALLBACK_MODEL);
     }
 }
