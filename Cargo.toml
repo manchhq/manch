@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/manch-protocol", "crates/manch-dto", "crates/manch-llm", "crates/manch-acp", "apps/server", "apps/desktop/src-tauri"]
+members = ["crates/manch-protocol", "crates/manch-dto", "crates/manch-llm", "crates/manch-acp", "crates/manch-core", "apps/server", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.0.0"
