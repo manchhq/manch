@@ -2354,6 +2354,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "manch-core"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "manch-protocol",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "manch-desktop"
 version = "0.0.0"
 dependencies = [
