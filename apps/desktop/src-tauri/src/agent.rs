@@ -32,8 +32,8 @@ pub fn offerable_providers(mut saved: Vec<String>) -> Vec<String> {
     saved
 }
 
-/// `EventSink` that maps ACP events to `StreamEvent` and forwards them over a
-/// Tauri IPC channel. `emitted` gates nothing here — the agent decides Done/Err.
+/// `EventSink` that maps each `AgentEvent` to a `StreamEvent` (via `map_event`)
+/// and forwards it over a Tauri IPC channel. The agent decides Done/Err.
 pub struct ChannelSink(pub Channel<StreamEvent>);
 
 impl ChannelSink {
@@ -101,15 +101,15 @@ pub fn resolve_agent(provider: &str, db: &Db) -> Result<Box<dyn manch_protocol::
             let (k, m) = byok("openai")?;
             Ok(Box::new(manch_llm::OpenAiAgent::new(k, m)))
         }
-        "claude-code" => Ok(Box::new(manch_acp::claude_code(
-            db.get_key("claude-code").map_err(|e| e.to_string())?,
-        ))),
-        "gemini-cli" => Ok(Box::new(manch_acp::gemini_cli(
-            db.get_key("gemini-cli").map_err(|e| e.to_string())?,
-        ))),
-        "codex" => Ok(Box::new(manch_acp::codex(
-            db.get_key("codex").map_err(|e| e.to_string())?,
-        ))),
+        "claude-code" | "gemini-cli" | "codex" => {
+            let key = db.get_key(provider).map_err(|e| e.to_string())?;
+            let agent: Box<dyn manch_protocol::Agent> = match provider {
+                "claude-code" => Box::new(manch_acp::claude_code(key)),
+                "gemini-cli" => Box::new(manch_acp::gemini_cli(key)),
+                _ => Box::new(manch_acp::codex(key)),
+            };
+            Ok(agent)
+        }
         _ => Err(format!("unknown provider: {provider}")),
     }
 }

@@ -1,8 +1,11 @@
 //! BYOK provider clients for Manch — direct provider HTTP/SSE, no execution surface.
 //! Each provider implements `manch_protocol::Agent` and emits ACP event vocabulary.
 
-use manch_protocol::Context;
-use manch_protocol::acp::ContentBlock;
+use std::sync::Arc;
+
+use futures_util::StreamExt;
+use manch_protocol::acp::{ContentBlock, StopReason};
+use manch_protocol::{AgentEvent, Context, EventSink, Result};
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
@@ -82,6 +85,79 @@ pub(crate) fn err(e: impl ToString) -> manch_protocol::Error {
     manch_protocol::Error::Other(e.to_string())
 }
 
+/// Build a `ModelInfo` for a provider's fallback id.
+pub(crate) fn fallback_model(id: &str) -> ModelInfo {
+    ModelInfo {
+        id: id.to_string(),
+        display_name: None,
+    }
+}
+
+/// Shared list-models flow: on a 2xx body, parse with the provider's `parse`
+/// (empty → the fallback); on any failure, degrade to the single fallback model.
+pub(crate) async fn list_models_with(
+    resp: reqwest::Result<reqwest::Response>,
+    fallback_id: &str,
+    parse: impl Fn(&serde_json::Value) -> Vec<ModelInfo>,
+) -> Result<Vec<ModelInfo>> {
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.map_err(err)?;
+            let models = parse(&body);
+            Ok(if models.is_empty() {
+                vec![fallback_model(fallback_id)]
+            } else {
+                models
+            })
+        }
+        _ => Ok(vec![fallback_model(fallback_id)]),
+    }
+}
+
+/// Extract a human error message from a response body. Surfaces `error.message`
+/// when the body is JSON; otherwise `"{provider}: HTTP {status}"`. Pure — split
+/// from [`http_error`] so the fallback behaviour is unit-testable. A proxy's
+/// HTML 502/504 body simply fails to parse and takes the fallback branch.
+pub(crate) fn error_message(provider: &str, status: reqwest::StatusCode, body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+        .map(|m| format!("{provider}: {m}"))
+        .unwrap_or_else(|| format!("{provider}: HTTP {status}"))
+}
+
+/// Turn a non-2xx response into an error. Reads the body as **text first** — a
+/// proxy's HTML 502/504 isn't JSON, and calling `.json()` on it would mask the
+/// real status behind a generic decode error. Consumes `resp`.
+pub(crate) async fn http_error(provider: &str, resp: reqwest::Response) -> manch_protocol::Error {
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    err(error_message(provider, status, &text))
+}
+
+/// Shared SSE streaming loop: decode byte chunks (splitting on `\n` so multibyte
+/// UTF-8 stays whole), drain complete lines through `parse`, emit text live,
+/// surface a parsed stream error, and emit `Done` when the stream ends.
+pub(crate) async fn stream_sse(
+    resp: reqwest::Response,
+    sink: &Arc<dyn EventSink>,
+    parse: impl Fn(&str) -> Option<SseItem>,
+) -> Result<StopReason> {
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(&chunk.map_err(err)?);
+        for item in drain_sse(&mut buf, &parse) {
+            match item {
+                SseItem::Text(t) => sink.emit(AgentEvent::text_chunk(t)).await?,
+                SseItem::Error(e) => return Err(err(e)),
+            }
+        }
+    }
+    sink.emit(AgentEvent::Done(StopReason::EndTurn)).await?;
+    Ok(StopReason::EndTurn)
+}
+
 /// Fetch selectable models for a BYOK provider id. Unknown / disabled providers
 /// yield `NotFound`. Each provider degrades to its fallback model on fetch failure.
 pub async fn list_models(provider: &str, api_key: &str) -> manch_protocol::Result<Vec<ModelInfo>> {
@@ -127,5 +203,33 @@ mod tests {
     async fn list_models_rejects_unknown_provider() {
         let e = super::list_models("nope", "k").await.unwrap_err();
         assert!(matches!(e, manch_protocol::Error::NotFound(_)));
+    }
+
+    #[test]
+    fn error_message_surfaces_json_error() {
+        let msg = error_message(
+            "openai",
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"bad key"}}"#,
+        );
+        assert_eq!(msg, "openai: bad key");
+    }
+
+    #[test]
+    fn error_message_falls_back_on_non_json_body() {
+        // A proxy's HTML 502 must not be masked by a JSON decode error.
+        let msg = error_message(
+            "gemini",
+            reqwest::StatusCode::BAD_GATEWAY,
+            "<html>502 Bad Gateway</html>",
+        );
+        assert_eq!(msg, "gemini: HTTP 502 Bad Gateway");
+    }
+
+    #[test]
+    fn fallback_model_has_no_display_name() {
+        let m = fallback_model("gpt-5-chat-latest");
+        assert_eq!(m.id, "gpt-5-chat-latest");
+        assert_eq!(m.display_name, None);
     }
 }

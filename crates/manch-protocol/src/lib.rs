@@ -95,8 +95,8 @@ impl AgentEvent {
     /// Convenience: an agent message text chunk in ACP vocabulary. The one place
     /// BYOK and ACP agents construct streamed text, so the ACP wrapping lives here.
     pub fn text_chunk(text: impl Into<String>) -> AgentEvent {
-        use acp::{ContentChunk, TextContent};
-        AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(ContentChunk::new(
+        use acp::{ContentChunk, SessionUpdate, TextContent};
+        AgentEvent::Update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
             ContentBlock::Text(TextContent::new(text.into())),
         )))
     }
