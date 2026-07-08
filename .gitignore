@@ -19,3 +19,7 @@ storybook-static/
 
 # Generated DTO TypeScript bindings (regenerated from Rust via `just gen`)
 apps/desktop/src/data/bindings.ts
+
+# Superpowers (local skills/harness dir + planning docs, not checked in)
+.superpowers/
+docs/superpowers/
