@@ -8,4 +8,4 @@ This project's agent guidance is shared across tools and lives in [`AGENTS.md`](
 
 - Prefer the `just` recipes (`just ci`, `just test`, `just gen`) over raw `cargo`/`pnpm` so you run exactly what CI runs.
 - The git hooks (Lefthook) run `fmt-check` + `lint` on commit and `clippy` + tests on push — let them run.
-- Architecture and the "why" live in [`README.md`](README.md); design history is under `docs/superpowers/`.
+- Architecture and the "why" live in [`README.md`](README.md).

@@ -57,7 +57,6 @@ Always prefer the `just` recipes over raw `cargo`/`pnpm` so you run exactly what
 | `packages/ui` | `@manch/ui` | Shared React components (Vitest tests). |
 | `packages/api` | `@manch/api` | Generated ConnectRPC TS client. **`src/gen/` is generated and gitignored** — run `just gen`. |
 | `proto/` | — | Protobuf service/message definitions (source of truth for the API). |
-| `docs/superpowers/` | — | Design specs and implementation plans (history of decisions). |
 
 ## Conventions that the tooling enforces
 

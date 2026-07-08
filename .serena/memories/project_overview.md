@@ -17,7 +17,6 @@ Polyglot monorepo for **Manch**, a domain-free substrate for building agents on 
 ## Canonical docs (prefer these — keep them authoritative, not this memory)
 - `AGENTS.md` — operational guide (commands, repo map, conventions).
 - `README.md` — architecture and the "why".
-- `docs/superpowers/` — design specs + implementation plans.
 
 ## The one architectural rule
 Manch speaks ACP's vocabulary; it does not reinvent it. Content/event types come from `agent_client_protocol`, re-exported via `manch_protocol::acp`. Do not define parallel enums.
