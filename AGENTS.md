@@ -87,7 +87,7 @@ These are **optional** — the project builds, tests, and ships entirely without
 
 [Serena](https://github.com/oraios/serena) gives symbol-level navigation (find a symbol, its references, callers) and project memories, without reading whole files. This repo is already set up for it:
 
-- `.serena/project.yml` — project config (languages: **rust**, **typescript**) and `.serena/memories/` — onboarding notes. Both are committed.
+- `.serena/project.yml` — project config (languages: **rust**, **typescript**) and `.serena/memories/` — onboarding notes. Both are local-only (`.serena/` is gitignored, not committed).
 - `.mcp.json` — declares the Serena MCP server, so any MCP-aware tool (Claude Code, etc.) opening this repo can start it.
 
 To use it you need:

@@ -23,3 +23,6 @@ apps/desktop/src/data/bindings.ts
 # Superpowers (local skills/harness dir + planning docs, not checked in)
 .superpowers/
 docs/superpowers/
+
+# Serena (local AI navigation config, not checked in)
+.serena/
