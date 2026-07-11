@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use manch_protocol::acp::ToolCall;
+use manch_protocol::acp::{ContentBlock, SessionUpdate, ToolCall};
 use manch_protocol::{AgentEvent, EventSink, Result};
 
 /// Wraps the caller's sink for one sub-turn: streamed `Update`s pass through
@@ -11,6 +11,7 @@ use manch_protocol::{AgentEvent, EventSink, Result};
 pub(crate) struct InterceptSink {
     inner: Arc<dyn EventSink>,
     captured: Mutex<Vec<ToolCall>>,
+    text: Mutex<String>,
 }
 
 impl InterceptSink {
@@ -18,11 +19,22 @@ impl InterceptSink {
         Self {
             inner,
             captured: Mutex::new(Vec::new()),
+            text: Mutex::new(String::new()),
         }
     }
     /// Drain the tool calls captured during the sub-turn.
     pub(crate) fn take_calls(&self) -> Vec<ToolCall> {
         std::mem::take(&mut self.captured.lock().unwrap())
+    }
+    /// Drain the assistant text accumulated during the sub-turn (`None` if the
+    /// sub-turn emitted no text — e.g. a pure tool-call turn).
+    pub(crate) fn take_text(&self) -> Option<String> {
+        let mut guard = self.text.lock().unwrap();
+        if guard.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut *guard))
+        }
     }
 }
 
@@ -38,7 +50,17 @@ impl EventSink for InterceptSink {
             // Explicit (not a catch-all) so that if `AgentEvent` grows a new
             // variant, this match fails to compile instead of silently
             // forwarding an unrecognized event to the caller as UI output.
-            AgentEvent::Update(u) => self.inner.emit(AgentEvent::Update(u)).await,
+            //
+            // Accumulate assistant text for persistence, then forward live as
+            // UI output. Non-text updates pass through untouched.
+            AgentEvent::Update(u) => {
+                if let SessionUpdate::AgentMessageChunk(chunk) = &u
+                    && let ContentBlock::Text(t) = &chunk.content
+                {
+                    self.text.lock().unwrap().push_str(&t.text);
+                }
+                self.inner.emit(AgentEvent::Update(u)).await
+            }
         }
     }
 }
@@ -49,7 +71,7 @@ mod tests {
 
     use manch_protocol::PromptHandler;
     use manch_protocol::acp::{ContentBlock, StopReason, TextContent, ToolCall};
-    use manch_protocol::{AgentEvent, Error};
+    use manch_protocol::{AgentEvent, Error, MemoryStore, Role};
 
     use crate::Manch;
     use crate::testing::{CollectSink, ScriptAgent, VecStore};
@@ -116,8 +138,8 @@ mod tests {
         assert_eq!(updates, 1);
         assert_eq!(dones, 1);
         assert!(matches!(evs.last(), Some(AgentEvent::Done(_))));
-        // the inbound user message was appended to memory.
-        assert_eq!(store.len(), 1);
+        // the user message + the assistant's "hello" were both appended.
+        assert_eq!(store.len(), 2);
     }
 
     #[tokio::test]
@@ -160,8 +182,8 @@ mod tests {
                 .count(),
             1
         );
-        // memory: user msg + tool result appended.
-        assert_eq!(store.len(), 2);
+        // memory: user msg + tool result + assistant "done" appended.
+        assert_eq!(store.len(), 3);
     }
 
     #[tokio::test]
@@ -199,10 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assistant_output_is_not_persisted_yet() {
-        // Documents a known gap (see spec "Known gaps"): core does not persist
-        // assistant turns. When assistant-persistence lands, this assertion
-        // changes.
+    async fn assistant_output_is_persisted() {
         let agent = ScriptAgent::new(
             "a",
             vec![
@@ -228,15 +247,26 @@ mod tests {
             .handle("a", "s", user_msg("first"), sink.clone())
             .await
             .unwrap();
+
+        // After turn 1: [User "first", Assistant "first reply"].
+        let ctx = store.assemble_context("s").await.unwrap();
+        assert_eq!(ctx.turns.len(), 2);
+        assert_eq!(ctx.turns[0].role, Role::User);
+        assert_eq!(ctx.turns[1].role, Role::Assistant);
+        match &ctx.turns[1].blocks[0] {
+            ContentBlock::Text(t) => assert_eq!(t.text, "first reply"),
+            _ => panic!("expected assistant text"),
+        }
+
         manch
             .handle("a", "s", user_msg("second"), sink.clone())
             .await
             .unwrap();
 
-        // Only the two USER message blocks made it into the store; neither
-        // "first reply" nor "second reply" (the agent's own streamed output)
-        // was ever appended.
-        assert_eq!(store.len(), 2);
+        // Turn 2 sees turn 1's assistant reply: [User, Assistant, User, Assistant].
+        let ctx2 = store.assemble_context("s").await.unwrap();
+        assert_eq!(ctx2.turns.len(), 4);
+        assert_eq!(ctx2.turns[3].role, Role::Assistant);
     }
 
     #[tokio::test]

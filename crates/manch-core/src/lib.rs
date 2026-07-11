@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use builder::ManchBuilder;
-use manch_protocol::acp::{ContentBlock, StopReason};
+use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
 use manch_protocol::{
-    Agent, AgentEvent, Channel, Error, EventSink, MemoryStore, PromptHandler, Result, Tool,
+    Agent, AgentEvent, Channel, Error, EventSink, MemoryStore, PromptHandler, Result, Role, Tool,
     ToolSchema,
 };
 use turn::InterceptSink;
@@ -57,18 +57,12 @@ impl Manch {
 
 #[async_trait]
 impl PromptHandler for Manch {
-    // KNOWN GAP: this loop persists only inbound user blocks (below) and tool
-    // results (in the dispatch loop) to the `MemoryStore`. The agent's own
-    // streamed output — assistant text and the tool-call request itself — is
-    // forwarded live to the caller's `EventSink` but never written to memory.
-    // That's fine for the ACP-only #5 milestone (the external agent owns its
-    // own session/transcript), but it is inert, not correct, for anything that
-    // re-derives context from this store: a real SQLite `MemoryStore` (#3)
-    // would silently drop assistant turns from multi-turn history, and a BYOK
-    // re-prompt built from `assemble_context` would replay a `tool_result`
-    // with no preceding `tool_use` in the transcript. Persisting assistant
-    // turns (and the originating `ToolCall`) is deferred, not designed away —
-    // don't build on the assumption that memory already holds them.
+    // Persistence: inbound user blocks (User), the agent's own streamed text
+    // (Assistant, accumulated per sub-turn in `InterceptSink`), and host-tool
+    // results (User — Anthropic's "tool_result lives in a user turn" shape).
+    // The assistant `tool_use` request block is NOT persisted yet; proper
+    // tool_use/tool_result role pairing waits on a BYOK provider that emits
+    // tool calls (#22).
     async fn handle(
         &self,
         agent_id: &str,
@@ -83,7 +77,7 @@ impl PromptHandler for Manch {
             .clone();
 
         for block in message {
-            self.memory.append(session_id, block).await?;
+            self.memory.append(session_id, Role::User, block).await?;
         }
 
         let schemas: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
@@ -92,6 +86,16 @@ impl PromptHandler for Manch {
             let ctx = self.memory.assemble_context(session_id).await?;
             let intercept = Arc::new(InterceptSink::new(sink.clone()));
             let stop = agent.prompt(ctx, &schemas, intercept.clone()).await?;
+
+            if let Some(text) = intercept.take_text() {
+                self.memory
+                    .append(
+                        session_id,
+                        Role::Assistant,
+                        ContentBlock::Text(TextContent::new(text)),
+                    )
+                    .await?;
+            }
 
             let calls = intercept.take_calls();
             if calls.is_empty() {
@@ -114,7 +118,7 @@ impl PromptHandler for Manch {
                 let args = tc.raw_input.take().unwrap_or(serde_json::Value::Null);
                 let result = tool.call(args).await?;
                 self.memory
-                    .append(session_id, tool_result_block(&tc, result))
+                    .append(session_id, Role::User, tool_result_block(&tc, result))
                     .await?;
             }
         }
