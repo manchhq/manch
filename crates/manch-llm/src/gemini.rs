@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use manch_protocol::acp::StopReason;
-use manch_protocol::{Agent, Context, EventSink, Result, ToolSchema};
+use manch_protocol::{Agent, Context, EventSink, Result, Role, ToolSchema, Turn};
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, prompt_text};
+use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, turn_text};
 
 const BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const FALLBACK_MODEL: &str = "gemini-3-flash";
@@ -25,9 +25,19 @@ impl GeminiAgent {
     }
 }
 
-/// Pure request body: a single user turn.
-pub(crate) fn request_body(prompt: &str) -> serde_json::Value {
-    serde_json::json!({ "contents": [{ "role": "user", "parts": [{ "text": prompt }] }] })
+/// Pure request body: role-tagged turns as Gemini `contents`.
+pub(crate) fn request_body(turns: &[Turn]) -> serde_json::Value {
+    let contents: Vec<serde_json::Value> = turns
+        .iter()
+        .map(|t| {
+            let role = match t.role {
+                Role::User => "user",
+                Role::Assistant => "model",
+            };
+            serde_json::json!({ "role": role, "parts": [{ "text": turn_text(t) }] })
+        })
+        .collect();
+    serde_json::json!({ "contents": contents })
 }
 
 /// Parse one SSE line: concatenate the candidate's text parts, or surface an error. Pure.
@@ -115,12 +125,11 @@ impl Agent for GeminiAgent {
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         ensure_crypto_provider();
-        let prompt = prompt_text(&ctx);
         let url = format!("{BASE}/models/{}:streamGenerateContent?alt=sse", self.model);
         let resp = reqwest::Client::new()
             .post(url)
             .header("x-goog-api-key", &self.api_key)
-            .json(&request_body(&prompt))
+            .json(&request_body(&ctx.turns))
             .send()
             .await
             .map_err(err)?;
@@ -135,12 +144,34 @@ impl Agent for GeminiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use manch_protocol::acp::{ContentBlock, TextContent};
+    use manch_protocol::{Role, Turn};
+
+    fn u(text: &str) -> Turn {
+        Turn {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+        }
+    }
+    fn a(text: &str) -> Turn {
+        Turn {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+        }
+    }
 
     #[test]
-    fn request_body_has_user_part() {
-        let body = request_body("hi");
+    fn request_body_maps_single_user_turn() {
+        let body = request_body(&[u("hi")]);
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn request_body_maps_assistant_to_model_role() {
+        let body = request_body(&[u("q1"), a("a1")]);
+        assert_eq!(body["contents"][1]["role"], "model");
+        assert_eq!(body["contents"][1]["parts"][0]["text"], "a1");
     }
 
     #[test]
