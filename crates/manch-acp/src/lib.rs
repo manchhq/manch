@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::v1::ToolCallStatus;
 use async_trait::async_trait;
 use manch_protocol::acp::{SessionUpdate, StopReason};
-use manch_protocol::{Agent, AgentEvent, Context, EventSink, Result, ToolSchema};
+use manch_protocol::{Agent, AgentEvent, Context, EventSink, Result, Role, ToolSchema};
 
 const CLAUDE_CODE_PKG: &str = "@agentclientprotocol/claude-agent-acp@latest";
 const CODEX_PKG: &str = "@zed-industries/codex-acp";
@@ -138,7 +138,17 @@ impl Agent for AcpCliAgent {
         // Isolate each session's ACP workspace by session id (was a single shared
         // temp dir). `ctx` is owned, so the blocks move rather than clone.
         let cwd = std::env::temp_dir().join(format!("manch-acp-{}", ctx.session_id));
-        let blocks = ctx.blocks;
+        // ACP's PromptRequest is role-less and the external agent owns its own
+        // in-session history, so send only the current (trailing) user turn —
+        // never feed the agent its own prior assistant replies as user input.
+        // Single-turn (#5) has exactly one user turn, so this is unchanged there.
+        let blocks = ctx
+            .turns
+            .into_iter()
+            .rev()
+            .find(|t| t.role == Role::User)
+            .map(|t| t.blocks)
+            .unwrap_or_default();
         let id = self.id;
 
         // The 'static notification handler owns a clone of the sink and emits
