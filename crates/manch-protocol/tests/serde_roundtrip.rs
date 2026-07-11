@@ -2,7 +2,7 @@
 //! round-trip unchanged. A stable wire contract is the reason this crate exists.
 
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent, ToolKind};
-use manch_protocol::{Context, ToolSchema};
+use manch_protocol::{Context, Role, ToolSchema, Turn};
 use proptest::prelude::*;
 
 /// Arbitrary JSON values, deliberately excluding floats so equality is exact
@@ -54,18 +54,23 @@ fn arb_tool_schema() -> impl Strategy<Value = ToolSchema> {
         })
 }
 
+fn arb_role() -> impl Strategy<Value = Role> {
+    prop_oneof![Just(Role::User), Just(Role::Assistant)]
+}
+
+fn arb_turn() -> impl Strategy<Value = Turn> {
+    (arb_role(), prop::collection::vec(any::<String>(), 0..4)).prop_map(|(role, texts)| Turn {
+        role,
+        blocks: texts
+            .into_iter()
+            .map(|t| ContentBlock::Text(TextContent::new(t)))
+            .collect(),
+    })
+}
+
 fn arb_context() -> impl Strategy<Value = Context> {
-    (
-        any::<String>(),
-        prop::collection::vec(any::<String>(), 0..5),
-    )
-        .prop_map(|(session_id, texts)| Context {
-            session_id,
-            blocks: texts
-                .into_iter()
-                .map(|t| ContentBlock::Text(TextContent::new(t)))
-                .collect(),
-        })
+    (any::<String>(), prop::collection::vec(arb_turn(), 0..4))
+        .prop_map(|(session_id, turns)| Context { session_id, turns })
 }
 
 proptest! {

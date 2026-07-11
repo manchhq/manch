@@ -66,16 +66,46 @@ pub enum Error {
 /// Convenience alias for fallible Manch operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// One role-attributed span of the conversation: contiguous same-role blocks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Turn {
+    pub role: Role,
+    pub blocks: Vec<ContentBlock>,
+}
+
 /// Context assembled by a [`MemoryStore`] and handed to an [`Agent`] for a turn.
 ///
-/// Assembling this — retrieval, summarisation, compaction — is the hard problem,
-/// and it lives behind [`MemoryStore::assemble_context`] so it can be iterated
-/// without touching the runtime or any agent.
+/// Role lives here, not in [`ContentBlock`]: ACP keeps author in its *streaming*
+/// vocabulary, so a stored block can't say who spoke. Persistence and assembly
+/// are Manch's seam, so the role dimension is Manch's to add.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Context {
     pub session_id: String,
-    /// The conversation as ACP content blocks, oldest first.
-    pub blocks: Vec<ContentBlock>,
+    /// The conversation as role-tagged turns, oldest first.
+    pub turns: Vec<Turn>,
+}
+
+/// Fold an ordered `(role, block)` log into [`Turn`]s by merging runs of the
+/// same role. The one place turn-grouping lives, so every [`MemoryStore`]
+/// coalesces identically.
+pub fn coalesce_turns(items: impl IntoIterator<Item = (Role, ContentBlock)>) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = Vec::new();
+    for (role, block) in items {
+        match turns.last_mut() {
+            Some(last) if last.role == role => last.blocks.push(block),
+            _ => turns.push(Turn {
+                role,
+                blocks: vec![block],
+            }),
+        }
+    }
+    turns
 }
 
 /// A streamed unit of progress from an [`Agent`] during a turn.
@@ -175,8 +205,8 @@ pub trait Channel: Send + Sync {
 /// retrieval-backed strategy.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
-    /// Append a content block to a session's append-only history.
-    async fn append(&self, session_id: &str, block: ContentBlock) -> Result<()>;
+    /// Append a role-tagged content block to a session's append-only history.
+    async fn append(&self, session_id: &str, role: Role, block: ContentBlock) -> Result<()>;
 
     /// Assemble the context for the next turn. **The seam** — retrieval,
     /// summarisation, and compaction all live behind this one method.
@@ -214,5 +244,23 @@ mod tests {
             },
             _ => panic!("expected AgentMessageChunk update"),
         }
+    }
+
+    #[test]
+    fn coalesce_merges_runs_of_same_role() {
+        use acp::{ContentBlock, TextContent};
+        let b = |s: &str| ContentBlock::Text(TextContent::new(s.to_string()));
+        let turns = coalesce_turns([
+            (Role::User, b("a")),
+            (Role::User, b("b")),
+            (Role::Assistant, b("c")),
+            (Role::User, b("d")),
+        ]);
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].role, Role::User);
+        assert_eq!(turns[0].blocks.len(), 2);
+        assert_eq!(turns[1].role, Role::Assistant);
+        assert_eq!(turns[2].role, Role::User);
+        assert_eq!(turns[2].blocks.len(), 1);
     }
 }

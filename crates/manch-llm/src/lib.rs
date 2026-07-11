@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use manch_protocol::acp::{ContentBlock, StopReason};
-use manch_protocol::{AgentEvent, Context, EventSink, Result};
+use manch_protocol::{AgentEvent, EventSink, Result, Turn};
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
@@ -57,10 +57,10 @@ pub(crate) fn drain_sse(
     out
 }
 
-/// Flatten a `Context` into a single prompt string (concatenated user text
-/// blocks). Placeholder until real memory/multi-turn assembly lands.
-pub(crate) fn prompt_text(ctx: &Context) -> String {
-    ctx.blocks
+/// Concatenate a turn's text blocks into one string. Non-text blocks are
+/// ignored — multimodal message mapping is future work.
+pub(crate) fn turn_text(turn: &Turn) -> String {
+    turn.blocks
         .iter()
         .filter_map(|b| match b {
             ContentBlock::Text(t) => Some(t.text.as_str()),
@@ -175,8 +175,6 @@ pub async fn list_models(provider: &str, api_key: &str) -> manch_protocol::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use manch_protocol::Context;
-    use manch_protocol::acp::{ContentBlock, TextContent};
 
     #[test]
     fn drain_sse_extracts_data_lines_and_leaves_partial() {
@@ -185,18 +183,6 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], SseItem::Text(s) if s == "{\"t\":1}"));
         assert_eq!(String::from_utf8_lossy(&buf), "data: partial"); // partial retained
-    }
-
-    #[test]
-    fn prompt_text_joins_user_text_blocks() {
-        let ctx = Context {
-            session_id: "s1".into(),
-            blocks: vec![
-                ContentBlock::Text(TextContent::new("hello".to_string())),
-                ContentBlock::Text(TextContent::new("world".to_string())),
-            ],
-        };
-        assert_eq!(prompt_text(&ctx), "hello\nworld");
     }
 
     #[tokio::test]
@@ -231,5 +217,20 @@ mod tests {
         let m = fallback_model("gpt-5-chat-latest");
         assert_eq!(m.id, "gpt-5-chat-latest");
         assert_eq!(m.display_name, None);
+    }
+
+    #[test]
+    fn turn_text_joins_multiple_text_blocks_with_newline() {
+        use manch_protocol::acp::{ContentBlock, TextContent};
+        use manch_protocol::{Role, Turn};
+
+        let turn = Turn {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text(TextContent::new("hello".to_string())),
+                ContentBlock::Text(TextContent::new("world".to_string())),
+            ],
+        };
+        assert_eq!(turn_text(&turn), "hello\nworld");
     }
 }

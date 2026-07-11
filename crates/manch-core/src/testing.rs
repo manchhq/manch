@@ -7,6 +7,7 @@ use manch_protocol::acp::{ContentBlock, StopReason, TextContent, ToolCallContent
 use manch_protocol::{
     Agent, AgentEvent, Context, EventSink, MemoryStore, Result, Tool, ToolSchema,
 };
+use manch_protocol::{Role, coalesce_turns};
 
 /// An `Agent` that replays a pre-scripted list of event batches — one batch per
 /// `prompt()` call. Each batch is emitted in order; the call returns `EndTurn`.
@@ -102,33 +103,35 @@ impl Tool for FailTool {
     }
 }
 
-/// A `MemoryStore` backed by an in-memory Vec. `assemble_context` returns the
-/// full history — the "dumbest strategy" #3 will also ship first.
+/// A `MemoryStore` backed by an in-memory Vec of role-tagged blocks.
+/// `assemble_context` coalesces them into turns — the "dumbest strategy" #3
+/// will also ship first.
 pub struct VecStore {
-    blocks: Mutex<Vec<ContentBlock>>,
+    entries: Mutex<Vec<(Role, ContentBlock)>>,
 }
 
 impl VecStore {
     pub fn new() -> Self {
         Self {
-            blocks: Mutex::new(Vec::new()),
+            entries: Mutex::new(Vec::new()),
         }
     }
+    /// Number of raw appended blocks (not turns).
     pub fn len(&self) -> usize {
-        self.blocks.lock().unwrap().len()
+        self.entries.lock().unwrap().len()
     }
 }
 
 #[async_trait]
 impl MemoryStore for VecStore {
-    async fn append(&self, _session_id: &str, block: ContentBlock) -> Result<()> {
-        self.blocks.lock().unwrap().push(block);
+    async fn append(&self, _session_id: &str, role: Role, block: ContentBlock) -> Result<()> {
+        self.entries.lock().unwrap().push((role, block));
         Ok(())
     }
     async fn assemble_context(&self, session_id: &str) -> Result<Context> {
         Ok(Context {
             session_id: session_id.to_string(),
-            blocks: self.blocks.lock().unwrap().clone(),
+            turns: coalesce_turns(self.entries.lock().unwrap().iter().cloned()),
         })
     }
 }
@@ -168,7 +171,7 @@ mod smoke {
             .prompt(
                 Context {
                     session_id: "s".into(),
-                    blocks: vec![],
+                    turns: vec![],
                 },
                 &[],
                 sink.clone(),

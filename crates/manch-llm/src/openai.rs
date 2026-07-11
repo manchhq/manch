@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use manch_protocol::acp::StopReason;
-use manch_protocol::{Agent, Context, EventSink, Result, ToolSchema};
+use manch_protocol::{Agent, Context, EventSink, Result, Role, ToolSchema, Turn};
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, prompt_text};
+use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, turn_text};
 
 const URL: &str = "https://api.openai.com/v1/chat/completions";
 const MODELS_URL: &str = "https://api.openai.com/v1/models";
@@ -28,11 +28,21 @@ impl OpenAiAgent {
     }
 }
 
-pub(crate) fn request_body(model: &str, prompt: &str) -> serde_json::Value {
+pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
+    let messages: Vec<serde_json::Value> = turns
+        .iter()
+        .map(|t| {
+            let role = match t.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            serde_json::json!({ "role": role, "content": turn_text(t) })
+        })
+        .collect();
     serde_json::json!({
         "model": model,
         "stream": true,
-        "messages": [{ "role": "user", "content": prompt }],
+        "messages": messages,
     })
 }
 
@@ -127,11 +137,10 @@ impl Agent for OpenAiAgent {
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         ensure_crypto_provider();
-        let prompt = prompt_text(&ctx);
         let resp = reqwest::Client::new()
             .post(URL)
             .bearer_auth(&self.api_key)
-            .json(&request_body(&self.model, &prompt))
+            .json(&request_body(&self.model, &ctx.turns))
             .send()
             .await
             .map_err(err)?;
@@ -146,14 +155,38 @@ impl Agent for OpenAiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use manch_protocol::acp::{ContentBlock, TextContent};
+    use manch_protocol::{Role, Turn};
+
+    fn u(text: &str) -> Turn {
+        Turn {
+            role: Role::User,
+            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+        }
+    }
+    fn a(text: &str) -> Turn {
+        Turn {
+            role: Role::Assistant,
+            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+        }
+    }
 
     #[test]
-    fn request_body_streams_user_message() {
-        let body = request_body("gpt-5", "hi");
+    fn request_body_maps_single_user_turn() {
+        let body = request_body("gpt-5", &[u("hi")]);
         assert_eq!(body["model"], "gpt-5");
         assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn request_body_preserves_assistant_role() {
+        let body = request_body("m", &[u("q1"), a("a1"), u("q2")]);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][1]["role"], "assistant");
+        assert_eq!(body["messages"][1]["content"], "a1");
+        assert_eq!(body["messages"][2]["role"], "user");
     }
 
     #[test]
