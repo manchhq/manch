@@ -183,8 +183,10 @@ mod tests {
     #[test]
     fn request_body_preserves_assistant_role() {
         let body = request_body("m", &[u("q1"), a("a1"), u("q2")]);
+        assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][1]["content"], "a1");
+        assert_eq!(body["messages"][2]["role"], "user");
     }
 
     #[test]

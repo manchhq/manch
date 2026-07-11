@@ -66,7 +66,8 @@ pub(crate) fn turn_text(turn: &Turn) -> String {
             ContentBlock::Text(t) => Some(t.text.as_str()),
             _ => None,
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Install the `ring` rustls crypto provider once (reqwest `rustls-no-provider`
@@ -216,5 +217,20 @@ mod tests {
         let m = fallback_model("gpt-5-chat-latest");
         assert_eq!(m.id, "gpt-5-chat-latest");
         assert_eq!(m.display_name, None);
+    }
+
+    #[test]
+    fn turn_text_joins_multiple_text_blocks_with_newline() {
+        use manch_protocol::acp::{ContentBlock, TextContent};
+        use manch_protocol::{Role, Turn};
+
+        let turn = Turn {
+            role: Role::User,
+            blocks: vec![
+                ContentBlock::Text(TextContent::new("hello".to_string())),
+                ContentBlock::Text(TextContent::new("world".to_string())),
+            ],
+        };
+        assert_eq!(turn_text(&turn), "hello\nworld");
     }
 }
