@@ -8,7 +8,7 @@ use manch_dto::{
     CreateSchedule, CreateTeam, CreateWorkspace, CrossVerify, Report, RunStep, Schedule, SearchHit,
     StreamEvent, Team, TeamRun, Workspace,
 };
-use manch_protocol::Context;
+use manch_protocol::{Context, Role, Turn};
 use tauri::{State, ipc::Channel};
 
 #[tauri::command]
@@ -67,9 +67,12 @@ pub async fn send_prompt_stream(
     let agent = resolve_agent(&provider, &state)?;
     let ctx = Context {
         session_id: "desktop".to_string(),
-        blocks: vec![manch_protocol::acp::ContentBlock::Text(
-            manch_protocol::acp::TextContent::new(text),
-        )],
+        turns: vec![Turn {
+            role: Role::User,
+            blocks: vec![manch_protocol::acp::ContentBlock::Text(
+                manch_protocol::acp::TextContent::new(text),
+            )],
+        }],
     };
     let sink = Arc::new(ChannelSink(channel));
     match agent.prompt(ctx, &[], sink.clone()).await {
