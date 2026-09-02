@@ -26,6 +26,26 @@ pub struct ToolInvocation {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Provider-specific data that must be handed back **verbatim** when this
+    /// call is replayed to the same provider on a later turn. Captured when the
+    /// call is parsed, echoed when the conversation is rebuilt, and never
+    /// interpreted in between.
+    ///
+    /// It is deliberately opaque. Gemini's thinking models attach a
+    /// `thoughtSignature` to a function call and reject the next turn if it is
+    /// not returned; Anthropic's extended thinking has the same
+    /// echo-it-back constraint. Naming either one here would teach
+    /// `manch-protocol` a dialect's vocabulary and then be wrong for the other,
+    /// so the provider owns the shape and Manch only carries it.
+    ///
+    /// **Not a general-purpose bag.** Anything that does not have to survive a
+    /// round trip to satisfy a provider belongs somewhere else.
+    ///
+    /// `serde(default)` is load-bearing rather than tidiness: [`crate::Entry`]
+    /// is `Deserialize`, so a durable [`crate::MemoryStore`] will already hold
+    /// histories written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_meta: Option<serde_json::Value>,
 }
 
 /// Execution risk tier a [`Tool`] declares for itself. Governs auto-execution
@@ -152,5 +172,28 @@ mod context_tests {
         assert_eq!(cx.session_id, "session-1");
         assert_eq!(cx.invocation_id, "call-1");
         assert_eq!(cx.get::<Scope>(), Some(&Scope("clinic-7")));
+    }
+
+    #[test]
+    fn an_invocation_stored_before_provider_meta_existed_still_deserialises() {
+        // `Entry` is Deserialize and a durable MemoryStore will hold histories
+        // written before this field existed. Without serde(default), adopting
+        // it would break every stored conversation.
+        let stored = r#"{"id":"c1","name":"search","arguments":{"q":"asha"}}"#;
+        let inv: ToolInvocation = serde_json::from_str(stored).expect("old histories must load");
+        assert_eq!(inv.id, "c1");
+        assert!(inv.provider_meta.is_none());
+    }
+
+    #[test]
+    fn an_invocation_without_provider_meta_does_not_serialise_the_key() {
+        let inv = ToolInvocation {
+            id: "c1".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({}),
+            provider_meta: None,
+        };
+        let json = serde_json::to_value(&inv).unwrap();
+        assert!(json.get("provider_meta").is_none(), "got {json}");
     }
 }

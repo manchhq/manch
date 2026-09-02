@@ -37,6 +37,7 @@ pub struct ModelInfo {
 /// fragments, end), but `parse_line` is a pure function of one line and must
 /// stay that way — so parsers emit these fragments and [`ToolAccum`], owned by
 /// [`stream_sse`] for the life of the stream, assembles them.
+#[derive(Debug)]
 pub(crate) enum SseItem {
     Text(String),
     Usage(Usage),
@@ -46,6 +47,10 @@ pub(crate) enum SseItem {
         index: u32,
         id: String,
         name: String,
+        /// Provider data that must be echoed back verbatim when this call is
+        /// replayed on a later turn. Opaque here — the provider that captured
+        /// it owns its shape. `None` for dialects that need nothing.
+        provider_meta: Option<serde_json::Value>,
     },
     /// One fragment of the call's argument JSON at `index`, to be concatenated
     /// in arrival order.
@@ -67,8 +72,8 @@ pub(crate) enum SseItem {
 /// any of them (interleaved calls).
 #[derive(Default)]
 pub(crate) struct ToolAccum {
-    /// index -> (id, name, accumulated argument JSON).
-    open: HashMap<u32, (String, String, String)>,
+    /// index -> (id, name, accumulated argument JSON, provider round-trip data).
+    open: HashMap<u32, (String, String, String, Option<serde_json::Value>)>,
 }
 
 impl ToolAccum {
@@ -82,8 +87,14 @@ impl ToolAccum {
     /// unparsable call.
     pub(crate) fn apply(&mut self, item: SseItem) -> Option<AgentEvent> {
         match item {
-            SseItem::ToolCallStart { index, id, name } => {
-                self.open.insert(index, (id, name, String::new()));
+            SseItem::ToolCallStart {
+                index,
+                id,
+                name,
+                provider_meta,
+            } => {
+                self.open
+                    .insert(index, (id, name, String::new(), provider_meta));
                 None
             }
             SseItem::ToolCallArgs { index, json } => {
@@ -93,11 +104,12 @@ impl ToolAccum {
                 None
             }
             SseItem::ToolCallEnd { index } => {
-                let (id, name, json) = self.open.remove(&index)?;
+                let (id, name, json, provider_meta) = self.open.remove(&index)?;
                 Some(AgentEvent::ToolCall(ToolInvocation {
                     id,
                     name,
                     arguments: parse_tool_arguments(&json),
+                    provider_meta,
                 }))
             }
             SseItem::Text(_) | SseItem::Usage(_) | SseItem::Error(_) => None,
@@ -110,11 +122,12 @@ impl ToolAccum {
     pub(crate) fn flush(&mut self) -> Vec<AgentEvent> {
         self.open
             .drain()
-            .map(|(_, (id, name, json))| {
+            .map(|(_, (id, name, json, provider_meta))| {
                 AgentEvent::ToolCall(ToolInvocation {
                     id,
                     name,
                     arguments: parse_tool_arguments(&json),
+                    provider_meta,
                 })
             })
             .collect()
@@ -392,7 +405,8 @@ mod tests {
             acc.apply(SseItem::ToolCallStart {
                 index: 0,
                 id: "c1".into(),
-                name: "search".into()
+                name: "search".into(),
+                provider_meta: None,
             })
             .is_none()
         );
@@ -430,11 +444,13 @@ mod tests {
             index: 0,
             id: "a".into(),
             name: "one".into(),
+            provider_meta: None,
         });
         acc.apply(SseItem::ToolCallStart {
             index: 1,
             id: "b".into(),
             name: "two".into(),
+            provider_meta: None,
         });
         acc.apply(SseItem::ToolCallArgs {
             index: 1,
@@ -460,6 +476,7 @@ mod tests {
             index: 0,
             id: "c1".into(),
             name: "search".into(),
+            provider_meta: None,
         });
         acc.apply(SseItem::ToolCallArgs {
             index: 0,
@@ -480,6 +497,7 @@ mod tests {
             index: 0,
             id: "c".into(),
             name: "n".into(),
+            provider_meta: None,
         });
         let ev = acc.apply(SseItem::ToolCallEnd { index: 0 }).unwrap();
         match ev {
@@ -499,6 +517,7 @@ mod tests {
             index: 0,
             id: "c".into(),
             name: "n".into(),
+            provider_meta: None,
         });
         acc.apply(SseItem::ToolCallArgs {
             index: 0,
@@ -549,6 +568,7 @@ mod tests {
                     index: 0,
                     id: "c1".into(),
                     name: "search".into(),
+                    provider_meta: None,
                 }],
                 "args" => vec![SseItem::ToolCallArgs {
                     index: 0,
@@ -637,6 +657,7 @@ mod tests {
                     id: "c1".into(),
                     name: "t".into(),
                     arguments: serde_json::Value::Null,
+                    provider_meta: None,
                 }),
             ],
         };

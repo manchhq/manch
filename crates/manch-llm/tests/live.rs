@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use manch_llm::{AnthropicAgent, GeminiAgent, OpenAiAgent};
-use manch_protocol::acp::{ContentBlock, SessionUpdate, TextContent, ToolKind};
+use manch_protocol::acp::{
+    Content, ContentBlock, SessionUpdate, TextContent, ToolCallContent, ToolKind,
+};
 use manch_protocol::{
     Agent, AgentEvent, Context, Entry, EventSink, Result, Role, ToolSchema, Turn,
 };
@@ -147,7 +149,17 @@ async fn assert_tool_is_offered_and_called(agent: impl Agent, provider: &str) {
         "{provider}: expected exactly one tool call, got {calls:?}"
     );
     let call = &calls[0];
-    assert_eq!(call.name, "get_current_weather", "{provider}: wrong tool");
+    // Exact equality is deliberate. A Gemini 3 diagnostic named a call
+    // `default_api:clinic_fact`, and if that prefix ever appears on the wire
+    // rather than only in error text, `Manch::tool_for` cannot resolve it —
+    // the registry is keyed on `schema().name`. This assertion is where that
+    // would surface.
+    assert_eq!(
+        call.name, "get_current_weather",
+        "{provider}: tool name did not round-trip. A namespace prefix here (e.g. \
+         `default_api:get_current_weather`) would also break dispatch, which \
+         resolves against the bare schema name."
+    );
     assert!(
         !call.id.is_empty(),
         "{provider}: the invocation carries no id, so a result cannot be paired to it"
@@ -159,6 +171,78 @@ async fn assert_tool_is_offered_and_called(agent: impl Agent, provider: &str) {
             .is_some(),
         "{provider}: arguments did not reassemble into an object with `city` — got {}",
         call.arguments
+    );
+}
+
+/// Drive a full two-turn tool loop: ask, take the model's call, hand back a
+/// result, and ask again.
+///
+/// **The second turn is the point.** The first always succeeds, which is
+/// exactly why offline tests and a single-turn live test both missed that
+/// Gemini's thinking models attach a `thoughtSignature` to a function call and
+/// reject the follow-up unless it is returned verbatim. Anything a provider
+/// requires to be echoed shows up here and nowhere earlier.
+///
+/// Runs on the DEFAULT model deliberately: whatever `FALLBACK_MODEL` resolves
+/// to is what a caller who did not choose will get.
+async fn assert_a_tool_loop_completes_two_turns(agent: impl Agent, provider: &str) {
+    let first = Arc::new(Collector::default());
+    let question = "What is the current weather in Ahmedabad? Use the tool.";
+    agent
+        .prompt(ask(question), &[weather_tool()], first.clone())
+        .await
+        .unwrap_or_else(|e| panic!("{provider}: first turn failed — {e}"));
+
+    let calls = first.tool_calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "{provider}: expected one call, got {calls:?}"
+    );
+    let call = calls[0].clone();
+
+    // Replay the exchange the way `manch-core` would persist it: the user's
+    // question, the assistant's call, then the result addressed back to it.
+    let replay = Context {
+        session_id: "live-smoke".to_string(),
+        turns: vec![
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                    question.to_string(),
+                )))],
+            },
+            Turn {
+                role: Role::Assistant,
+                entries: vec![Entry::ToolCall(call.clone())],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::ToolResult {
+                    id: call.id.clone(),
+                    content: vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+                        TextContent::new("18 degrees Celsius and sunny".to_string()),
+                    )))],
+                }],
+            },
+        ],
+    };
+
+    let second = Arc::new(Collector::default());
+    agent
+        .prompt(replay, &[weather_tool()], second.clone())
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "{provider}: SECOND turn failed — the provider rejected the replayed history. \
+                 If it names a missing signature, the call's provider_meta was not echoed. \
+                 Error: {e}"
+            )
+        });
+
+    assert!(
+        !second.text().trim().is_empty(),
+        "{provider}: the second turn produced no answer from the tool result"
     );
 }
 
@@ -184,6 +268,16 @@ async fn anthropic_offers_a_tool_and_the_model_calls_it() {
     .await;
 }
 
+#[tokio::test]
+#[ignore = "live: needs ANTHROPIC_API_KEY"]
+async fn anthropic_completes_a_two_turn_tool_loop() {
+    assert_a_tool_loop_completes_two_turns(
+        AnthropicAgent::new(key("ANTHROPIC_API_KEY"), None),
+        "anthropic",
+    )
+    .await;
+}
+
 // ── OpenAI ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -198,6 +292,13 @@ async fn openai_offers_a_tool_and_the_model_calls_it() {
     // OpenAI never marks an individual tool call finished, so this also proves
     // the end-of-stream flush completes the call rather than dropping it.
     assert_tool_is_offered_and_called(OpenAiAgent::new(key("OPENAI_API_KEY"), None), "openai")
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "live: needs OPENAI_API_KEY"]
+async fn openai_completes_a_two_turn_tool_loop() {
+    assert_a_tool_loop_completes_two_turns(OpenAiAgent::new(key("OPENAI_API_KEY"), None), "openai")
         .await;
 }
 
@@ -217,5 +318,15 @@ async fn gemini_offers_a_tool_and_the_model_calls_it() {
     // Gemini supplies no call id, so the non-empty-id assertion also covers the
     // synthesised-id path.
     assert_tool_is_offered_and_called(GeminiAgent::new(key("GEMINI_API_KEY"), None), "gemini")
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_completes_a_two_turn_tool_loop() {
+    // The regression test for the thought-signature echo. On a thinking model
+    // this fails with "Function call is missing a thought_signature in
+    // functionCall parts" unless the captured provider_meta is sent back.
+    assert_a_tool_loop_completes_two_turns(GeminiAgent::new(key("GEMINI_API_KEY"), None), "gemini")
         .await;
 }

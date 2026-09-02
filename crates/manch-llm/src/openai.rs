@@ -117,6 +117,7 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
                 id,
                 name,
                 arguments,
+                ..
             }) => Some(serde_json::json!({
                 "id": id,
                 "type": "function",
@@ -253,6 +254,7 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                     index,
                     id: id.to_string(),
                     name: name.to_string(),
+                    provider_meta: None,
                 });
             }
             if let Some(args) = tc
@@ -458,7 +460,7 @@ mod tests {
     fn parse_line_starts_a_tool_call_from_a_delta_with_id_and_name() {
         let d = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"search","arguments":""}}]}}]}"#;
         assert!(matches!(parse_line(d).as_slice(),
-            [crate::SseItem::ToolCallStart { index: 0, id, name }] if id == "c1" && name == "search"));
+            [crate::SseItem::ToolCallStart { index: 0, id, name, .. }] if id == "c1" && name == "search"));
     }
 
     #[test]
@@ -486,6 +488,7 @@ mod tests {
                     id: "c1".into(),
                     name: "search".into(),
                     arguments: serde_json::json!({"q":"asha"}),
+                    provider_meta: None,
                 })],
             },
             Turn {
@@ -524,6 +527,7 @@ mod tests {
                         id: "c1".into(),
                         name: "search".into(),
                         arguments: serde_json::json!({"q":"asha"}),
+                        provider_meta: None,
                     }),
                 ],
             },

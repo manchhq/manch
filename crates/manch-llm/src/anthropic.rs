@@ -120,6 +120,7 @@ fn entry_json(entry: &Entry) -> Option<serde_json::Value> {
             id,
             name,
             arguments,
+            ..
         }) => Some(serde_json::json!({
             "type": "tool_use",
             "id": id,
@@ -193,6 +194,7 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                     index: index as u32,
                     id: id.to_string(),
                     name: name.to_string(),
+                    provider_meta: None,
                 });
             }
         }
@@ -386,6 +388,7 @@ mod tests {
                     id: "c1".into(),
                     name: "search".into(),
                     arguments: serde_json::json!({"q":"asha"}),
+                    provider_meta: None,
                 })],
             },
             Turn {
@@ -465,7 +468,7 @@ mod tests {
     fn parse_line_starts_a_tool_call_on_content_block_start() {
         let d = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"search"}}"#;
         assert!(matches!(parse_line(d).as_slice(),
-            [crate::SseItem::ToolCallStart { index: 0, id, name }] if id == "c1" && name == "search"));
+            [crate::SseItem::ToolCallStart { index: 0, id, name, .. }] if id == "c1" && name == "search"));
     }
 
     #[test]

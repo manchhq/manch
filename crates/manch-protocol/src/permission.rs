@@ -159,6 +159,7 @@ mod tests {
             id: "c1".into(),
             name: "draft_prescription".into(),
             arguments: serde_json::Value::Null,
+            provider_meta: None,
         };
         match AskOncePolicy.decide(&cx, &inv).await.unwrap() {
             PermissionDecision::Ask(opts) => assert_eq!(opts.len(), 2),

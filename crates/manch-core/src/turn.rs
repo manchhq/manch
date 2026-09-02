@@ -116,6 +116,7 @@ mod tests {
             id: format!("call-{name}"),
             name: name.to_string(),
             arguments: serde_json::json!({ "x": 1 }),
+            provider_meta: None,
         })
     }
 
@@ -135,6 +136,7 @@ mod tests {
                         id: "call-1".into(),
                         name: "search_patients".into(),
                         arguments: serde_json::json!({ "name": "Asha" }),
+                        provider_meta: None,
                     })],
                     vec![AgentEvent::text_chunk("done")],
                 ],

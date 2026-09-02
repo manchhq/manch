@@ -135,10 +135,28 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
         Entry::Block(ContentBlock::Text(t)) => Some(serde_json::json!({ "text": t.text })),
         Entry::Block(_) => None,
         Entry::ToolCall(ToolInvocation {
-            name, arguments, ..
-        }) => Some(serde_json::json!({
-            "functionCall": { "name": name, "args": arguments },
-        })),
+            name,
+            arguments,
+            provider_meta,
+            ..
+        }) => {
+            let mut part = serde_json::json!({
+                "functionCall": { "name": name, "args": arguments },
+            });
+            // Whatever was captured alongside this call goes back exactly where
+            // it came from — as sibling keys of `functionCall`. Merged rather
+            // than nested, and omitted entirely when there is nothing: an
+            // explicit null is not the same as an absent key, and non-thinking
+            // models must see the body they saw before.
+            if let (Some(serde_json::Value::Object(meta)), Some(obj)) =
+                (provider_meta, part.as_object_mut())
+            {
+                for (k, v) in meta {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            Some(part)
+        }
         Entry::ToolResult { id, content } => {
             let name = resolve_tool_name(turns, turn_index, id).unwrap_or_else(|| id.clone());
             Some(serde_json::json!({
@@ -249,10 +267,19 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                 .to_string();
             let args = call.get("args").cloned().unwrap_or(serde_json::json!({}));
             let id = format!("gemini-{name}-{index}");
+            // Thinking models attach a `thoughtSignature` to the call and reject
+            // the NEXT turn unless it comes back verbatim. It is a sibling of
+            // `functionCall` on the part, not a field inside it. Captured under
+            // its own key so the rebuild can echo it without Manch's protocol
+            // ever learning what it means.
+            let provider_meta = part
+                .get("thoughtSignature")
+                .map(|sig| serde_json::json!({ "thoughtSignature": sig }));
             out.push(SseItem::ToolCallStart {
                 index,
                 id,
                 name: name.clone(),
+                provider_meta,
             });
             out.push(SseItem::ToolCallArgs {
                 index,
@@ -422,6 +449,74 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_captures_a_thought_signature_from_the_part() {
+        // Gemini 3 attaches a thoughtSignature as a SIBLING of functionCall on
+        // the part, and rejects the next turn if it is not handed back.
+        let d = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"asha"}},"thoughtSignature":"sig-abc"}]}}]}"#;
+        match parse_line(d).as_slice() {
+            [crate::SseItem::ToolCallStart { provider_meta, .. }, ..] => {
+                let meta = provider_meta
+                    .as_ref()
+                    .expect("the signature must be captured, not dropped");
+                assert_eq!(meta["thoughtSignature"], "sig-abc");
+            }
+            other => panic!("expected a tool call start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_leaves_provider_meta_unset_when_there_is_no_signature() {
+        // 2.5 is not a thinking model and sends none; nothing must be invented.
+        let d = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{}}}]}}]}"#;
+        match parse_line(d).as_slice() {
+            [crate::SseItem::ToolCallStart { provider_meta, .. }, ..] => {
+                assert!(provider_meta.is_none())
+            }
+            other => panic!("expected a tool call start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_body_echoes_provider_meta_beside_the_function_call() {
+        // The round trip that Gemini 3 requires: whatever was captured on the
+        // way in is emitted verbatim on the way back out.
+        let turns = vec![Turn {
+            role: Role::Assistant,
+            entries: vec![Entry::ToolCall(ToolInvocation {
+                id: "c1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({"q":"asha"}),
+                provider_meta: Some(serde_json::json!({"thoughtSignature": "sig-abc"})),
+            })],
+        }];
+        let part = &request_body(&turns, &[])["contents"][0]["parts"][0];
+        assert_eq!(part["functionCall"]["name"], "search");
+        assert_eq!(
+            part["thoughtSignature"], "sig-abc",
+            "the signature must sit beside functionCall, not inside it"
+        );
+    }
+
+    #[test]
+    fn request_body_omits_the_signature_key_entirely_when_absent() {
+        // An explicit null may be rejected, and 2.5 must be unchanged.
+        let turns = vec![Turn {
+            role: Role::Assistant,
+            entries: vec![Entry::ToolCall(ToolInvocation {
+                id: "c1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({}),
+                provider_meta: None,
+            })],
+        }];
+        let part = &request_body(&turns, &[])["contents"][0]["parts"][0];
+        assert!(
+            part.get("thoughtSignature").is_none(),
+            "absent means absent, not null: {part}"
+        );
+    }
+
+    #[test]
     fn a_gemini_call_gets_a_synthesised_id() {
         let d = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{}}}]}}]}"#;
         match parse_line(d).as_slice() {
@@ -442,6 +537,7 @@ mod tests {
                     id: "c1".into(),
                     name: "search".into(),
                     arguments: serde_json::json!({"q":"asha"}),
+                    provider_meta: None,
                 })],
             },
             Turn {
@@ -476,11 +572,13 @@ mod tests {
                         id: "c1".into(),
                         name: "search".into(),
                         arguments: serde_json::json!({"q":"asha"}),
+                        provider_meta: None,
                     }),
                     Entry::ToolCall(ToolInvocation {
                         id: "c2".into(),
                         name: "search".into(),
                         arguments: serde_json::json!({"q":"bhim"}),
+                        provider_meta: None,
                     }),
                 ],
             },
