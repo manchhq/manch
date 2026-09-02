@@ -330,3 +330,91 @@ async fn gemini_completes_a_two_turn_tool_loop() {
     assert_a_tool_loop_completes_two_turns(GeminiAgent::new(key("GEMINI_API_KEY"), None), "gemini")
         .await;
 }
+
+/// Two tools, so one question can force two calls in a single assistant turn.
+fn clinic_tools() -> Vec<ToolSchema> {
+    vec![
+        ToolSchema {
+            name: "whoami".to_string(),
+            description: "Which clinic the caller is in.".to_string(),
+            kind: ToolKind::Fetch,
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolSchema {
+            name: "bed_count".to_string(),
+            description: "How many beds this clinic has.".to_string(),
+            kind: ToolKind::Fetch,
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+    ]
+}
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_completes_a_two_turn_loop_with_parallel_calls() {
+    // Parallel calls are a different shape from a single call, and Gemini
+    // attaches a thoughtSignature to only the FIRST call of a batch. Both calls
+    // must therefore go back in ONE model turn with both results in ONE user
+    // turn — splitting them into alternating turns puts the second call in a
+    // turn of its own, where it has no signature and is rejected.
+    let agent = GeminiAgent::new(key("GEMINI_API_KEY"), None);
+    let tools = clinic_tools();
+    let question = "Which clinic am I in, and how many beds does it have? Call both tools.";
+
+    let first = Arc::new(Collector::default());
+    agent
+        .prompt(ask(question), &tools, first.clone())
+        .await
+        .unwrap_or_else(|e| panic!("gemini: first turn failed — {e}"));
+
+    let calls = first.tool_calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected two parallel calls, got {calls:?} — re-run if the model chose not to"
+    );
+
+    let mut assistant = Vec::new();
+    if !first.text().trim().is_empty() {
+        assistant.push(Entry::Block(ContentBlock::Text(TextContent::new(
+            first.text(),
+        ))));
+    }
+    let mut results = Vec::new();
+    for c in &calls {
+        assistant.push(Entry::ToolCall(c.clone()));
+        results.push(Entry::ToolResult {
+            id: c.id.clone(),
+            content: vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+                TextContent::new("kaayantar, 23 beds".to_string()),
+            )))],
+        });
+    }
+
+    let replay = Context {
+        session_id: "live-smoke".to_string(),
+        turns: vec![
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                    question.to_string(),
+                )))],
+            },
+            Turn {
+                role: Role::Assistant,
+                entries: assistant,
+            },
+            Turn {
+                role: Role::User,
+                entries: results,
+            },
+        ],
+    };
+
+    let second = Arc::new(Collector::default());
+    agent
+        .prompt(replay, &tools, second.clone())
+        .await
+        .unwrap_or_else(|e| panic!("gemini: SECOND turn failed with parallel calls — {e}"));
+    assert!(!second.text().trim().is_empty());
+}
