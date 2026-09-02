@@ -489,14 +489,14 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(db.get_model("anthropic").unwrap(), None);
         db.set_model("anthropic", "claude-opus-4-8").unwrap();
-        db.set_model("gemini", "gemini-3-flash").unwrap();
+        db.set_model("gemini", "gemini-flash-latest").unwrap();
         assert_eq!(
             db.get_model("anthropic").unwrap().as_deref(),
             Some("claude-opus-4-8")
         );
         assert_eq!(
             db.get_model("gemini").unwrap().as_deref(),
-            Some("gemini-3-flash")
+            Some("gemini-flash-latest")
         );
     }
 }
