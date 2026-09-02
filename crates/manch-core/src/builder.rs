@@ -52,7 +52,8 @@ mod tests {
     use manch_protocol::Tier;
 
     use crate::Manch;
-    use crate::testing::{EchoTool, ScriptAgent, VecStore};
+    use crate::MemStore;
+    use crate::testing::{EchoTool, ScriptAgent};
 
     #[test]
     fn build_requires_a_memory_store() {
@@ -72,7 +73,7 @@ mod tests {
                 Tier::Read,
                 Arc::new(Mutex::new(Vec::new())),
             )))
-            .memory(Arc::new(VecStore::new()))
+            .memory(Arc::new(MemStore::new()))
             .build()
             .unwrap();
         assert!(manch.agents.contains_key("a"));

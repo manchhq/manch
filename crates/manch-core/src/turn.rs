@@ -80,7 +80,8 @@ mod tests {
     };
 
     use crate::Manch;
-    use crate::testing::{CollectSink, EchoTool, ScriptAgent, VecStore};
+    use crate::MemStore;
+    use crate::testing::{CollectSink, EchoTool, ScriptAgent};
 
     #[tokio::test]
     async fn intercept_sink_forwards_usage_to_the_caller() {
@@ -117,7 +118,7 @@ mod tests {
         // The registry keys on schema().name. A tool whose human-readable title
         // differs from its name must still be reachable.
         let log = Arc::new(Mutex::new(Vec::new()));
-        let store = Arc::new(VecStore::new()); // renamed to MemStore in Task 5
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(ScriptAgent::new(
                 "a",
@@ -156,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_agent_is_not_found() {
         let manch = Manch::builder()
-            .memory(Arc::new(VecStore::new()))
+            .memory(Arc::new(MemStore::new()))
             .build()
             .unwrap();
         let sink = Arc::new(CollectSink::new());
@@ -177,7 +178,7 @@ mod tests {
                 AgentEvent::Done(StopReason::EndTurn),
             ]],
         );
-        let store = Arc::new(VecStore::new());
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(agent))
             .memory(store.clone())
@@ -223,7 +224,7 @@ mod tests {
                 ],
             ],
         );
-        let store = Arc::new(VecStore::new());
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(agent))
             .tool(Arc::new(echo))
@@ -268,7 +269,7 @@ mod tests {
                 ],
             ],
         );
-        let store = Arc::new(VecStore::new());
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(agent))
             .tool(Arc::new(echo))
@@ -299,7 +300,7 @@ mod tests {
         let agent = ScriptAgent::new("a", vec![vec![tool_call("ghost")]]);
         let manch = Manch::builder()
             .agent(Arc::new(agent))
-            .memory(Arc::new(VecStore::new()))
+            .memory(Arc::new(MemStore::new()))
             .build()
             .unwrap();
         let sink = Arc::new(CollectSink::new());
@@ -317,7 +318,7 @@ mod tests {
         let manch = Manch::builder()
             .agent(Arc::new(agent))
             .tool(Arc::new(FailTool::new("boom")))
-            .memory(Arc::new(VecStore::new()))
+            .memory(Arc::new(MemStore::new()))
             .build()
             .unwrap();
         let sink = Arc::new(CollectSink::new());
@@ -343,7 +344,7 @@ mod tests {
                 ],
             ],
         );
-        let store = Arc::new(VecStore::new());
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(agent))
             .memory(store.clone())
@@ -387,7 +388,7 @@ mod tests {
         let manch = Manch::builder()
             .agent(Arc::new(ScriptAgent::new("a", turns)))
             .tool(Arc::new(EchoTool::new("echo", Tier::Read, log)))
-            .memory(Arc::new(VecStore::new()))
+            .memory(Arc::new(MemStore::new()))
             .build()
             .unwrap();
         let sink = Arc::new(CollectSink::new());

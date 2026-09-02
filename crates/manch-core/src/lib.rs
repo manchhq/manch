@@ -9,7 +9,10 @@
 mod testing;
 
 mod builder;
+mod store;
 mod turn;
+
+pub use store::MemStore;
 
 use std::collections::HashMap;
 use std::sync::Arc;

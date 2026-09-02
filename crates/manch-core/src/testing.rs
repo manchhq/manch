@@ -7,10 +7,8 @@ use manch_protocol::acp::{
     Content, ContentBlock, StopReason, TextContent, ToolCallContent, ToolKind,
 };
 use manch_protocol::{
-    Agent, AgentEvent, Context, Entry, EventSink, MemoryStore, Result, Tier, Tool, ToolContext,
-    ToolSchema,
+    Agent, AgentEvent, Context, EventSink, Result, Tier, Tool, ToolContext, ToolSchema,
 };
-use manch_protocol::{Role, coalesce_turns};
 
 /// An `Agent` that replays a pre-scripted list of event batches — one batch per
 /// `prompt()` call. Each batch is emitted in order; the call returns `EndTurn`.
@@ -124,44 +122,6 @@ pub fn text_content(s: &str) -> ToolCallContent {
     ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
         s.to_string(),
     ))))
-}
-
-/// A `MemoryStore` backed by an in-memory Vec of role-tagged entries.
-/// `assemble_context` coalesces them into turns — the "dumbest strategy" #3
-/// will also ship first.
-pub struct VecStore {
-    entries: Mutex<Vec<(Role, Entry)>>,
-}
-
-impl VecStore {
-    pub fn new() -> Self {
-        Self {
-            entries: Mutex::new(Vec::new()),
-        }
-    }
-    /// Number of raw appended entries (not turns).
-    pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
-    }
-    /// The raw appended entries, oldest first — so a test can assert on the
-    /// ORDER a turn was persisted in, not merely how many entries it produced.
-    pub fn entries(&self) -> Vec<(Role, Entry)> {
-        self.entries.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl MemoryStore for VecStore {
-    async fn append(&self, _session_id: &str, role: Role, entry: Entry) -> Result<()> {
-        self.entries.lock().unwrap().push((role, entry));
-        Ok(())
-    }
-    async fn assemble_context(&self, session_id: &str) -> Result<Context> {
-        Ok(Context {
-            session_id: session_id.to_string(),
-            turns: coalesce_turns(self.entries.lock().unwrap().iter().cloned()),
-        })
-    }
 }
 
 /// An `EventSink` that records every emitted event for assertions.
