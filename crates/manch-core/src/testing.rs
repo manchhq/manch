@@ -143,6 +143,11 @@ impl VecStore {
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
     }
+    /// The raw appended entries, oldest first — so a test can assert on the
+    /// ORDER a turn was persisted in, not merely how many entries it produced.
+    pub fn entries(&self) -> Vec<(Role, Entry)> {
+        self.entries.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]

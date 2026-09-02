@@ -76,7 +76,7 @@ mod tests {
     use manch_protocol::PromptHandler;
     use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
     use manch_protocol::{
-        AgentEvent, Error, EventSink, MemoryStore, Role, Tier, Tool, ToolInvocation, Usage,
+        AgentEvent, Entry, Error, EventSink, MemoryStore, Role, Tier, Tool, ToolInvocation, Usage,
     };
 
     use crate::Manch;
@@ -249,6 +249,49 @@ mod tests {
         );
         // memory: user msg + assistant tool_call + tool result + assistant "done".
         assert_eq!(store.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_is_persisted_before_its_result() {
+        // Anthropic rejects a tool_result with no preceding tool_use, so a
+        // second loop iteration would send invalid history if these were
+        // stored the other way round. Assert the order, not the count.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let echo = EchoTool::new("echo", Tier::Read, log);
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![tool_call("echo")],
+                vec![
+                    AgentEvent::text_chunk("done"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(VecStore::new());
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(echo))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+
+        manch.handle("a", "s", user_msg("hi"), sink).await.unwrap();
+
+        let entries = store.entries();
+        let call_at = entries
+            .iter()
+            .position(|(_, e)| matches!(e, Entry::ToolCall(_)))
+            .expect("the assistant's tool call must be persisted");
+        let result_at = entries
+            .iter()
+            .position(|(_, e)| matches!(e, Entry::ToolResult { .. }))
+            .expect("the tool result must be persisted");
+        assert!(
+            call_at < result_at,
+            "tool_use must precede tool_result; got call at {call_at}, result at {result_at}"
+        );
     }
 
     #[tokio::test]
