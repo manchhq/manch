@@ -32,7 +32,7 @@ use turn::InterceptSink;
 
 /// Cap on prompt→tool→re-prompt cycles, guarding against a model that loops on
 /// tool calls forever.
-const MAX_TOOL_ITERS: usize = 8;
+pub const DEFAULT_MAX_TOOL_ITERS: usize = 8;
 
 /// The Manch runtime. Cheap to clone (every field is `Arc`), so a `Channel` can
 /// hold one and drive turns from its ingress loop.
@@ -42,6 +42,7 @@ pub struct Manch {
     pub(crate) tools: Arc<HashMap<String, Arc<dyn Tool>>>,
     pub(crate) channels: Arc<HashMap<String, Arc<dyn Channel>>>,
     pub(crate) memory: Arc<dyn MemoryStore>,
+    pub(crate) max_tool_iters: usize,
     /// Decides whether (and how) a human is asked before a `Draft`-tier tool
     /// executes. Manch ships a seam ([`PermissionPolicy`]) and a safe default
     /// (always ask), not a permission policy of its own.
@@ -93,7 +94,7 @@ impl Manch {
     /// [`acp::RequestPermissionOutcome::Cancelled`] ends the turn. In the first
     /// two cases the loop then continues — re-prompting *after* a result is not
     /// re-deciding, because the approved action has already run. That
-    /// continuation gets a fresh [`MAX_TOOL_ITERS`] budget: a human decision is
+    /// continuation gets a fresh [`DEFAULT_MAX_TOOL_ITERS`] budget: a human decision is
     /// not a loop iteration, and the cap exists to stop a model spinning
     /// unattended, which a resumed turn by definition is not.
     pub async fn approve(
@@ -135,7 +136,7 @@ impl Manch {
     ) -> Result<TurnOutcome> {
         let schemas: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
 
-        for _ in 0..MAX_TOOL_ITERS {
+        for _ in 0..self.max_tool_iters {
             let ctx = self.memory.assemble_context(session_id).await?;
             let intercept = Arc::new(InterceptSink::new(sink.clone()));
             let stop = agent.prompt(ctx, &schemas, intercept.clone()).await?;
@@ -184,7 +185,8 @@ impl Manch {
         }
 
         Err(Error::Other(format!(
-            "tool-call loop exceeded {MAX_TOOL_ITERS} iterations"
+            "tool-call loop exceeded {} iterations",
+            self.max_tool_iters
         )))
     }
 
