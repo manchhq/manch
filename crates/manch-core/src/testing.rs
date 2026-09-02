@@ -114,16 +114,6 @@ impl Tool for FailTool {
     }
 }
 
-/// Wrap `s` as a standard-content [`ToolCallContent`] — the common case a
-/// provider's tool result decodes into. Unused until the provider tests land
-/// (Tasks 10-12).
-#[allow(dead_code)]
-pub fn text_content(s: &str) -> ToolCallContent {
-    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
-        s.to_string(),
-    ))))
-}
-
 /// An `EventSink` that records every emitted event for assertions.
 #[derive(Clone, Default)]
 pub struct CollectSink {

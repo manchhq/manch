@@ -3,8 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use manch_protocol::acp::StopReason;
-use manch_protocol::{Agent, Context, EventSink, Result, Role, ToolSchema, Turn};
+use manch_protocol::acp::{ContentBlock, StopReason, ToolCallContent};
+use manch_protocol::{
+    Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
+};
 
 use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
@@ -50,12 +52,98 @@ pub(crate) fn models_url(base: &str) -> String {
     format!("{base}/models")
 }
 
+/// Build the `tools` array Anthropic expects: `[{ name, description,
+/// input_schema }]`. `input_schema` is already the JSON Schema a `Tool`
+/// declares — only the envelope is Anthropic-specific. Pure.
+pub(crate) fn tools_json(tools: &[ToolSchema]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Map one tool result's content blocks onto Anthropic's `tool_result`
+/// content array. Only the text case is meaningful on today's `Tool` surface;
+/// anything else (a future `Diff`/`Terminal` content kind) still serialises
+/// rather than panicking, so an unexpected content kind degrades instead of
+/// dropping the turn.
+fn tool_result_content_json(content: &[ToolCallContent]) -> serde_json::Value {
+    serde_json::Value::Array(
+        content
+            .iter()
+            .map(|c| match c {
+                ToolCallContent::Content(inner) => match &inner.content {
+                    ContentBlock::Text(t) => serde_json::json!({ "type": "text", "text": t.text }),
+                    other => serde_json::json!({
+                        "type": "text",
+                        "text": serde_json::to_string(other).unwrap_or_default(),
+                    }),
+                },
+                other => serde_json::json!({
+                    "type": "text",
+                    "text": serde_json::to_string(other).unwrap_or_default(),
+                }),
+            })
+            .collect(),
+    )
+}
+
+/// Map one turn entry onto an Anthropic content block. `Entry::Block` covers
+/// only text (as `turn_text` already did — a non-text block is not yet
+/// mapped); `Entry::ToolCall` becomes a `tool_use` block and `Entry::ToolResult`
+/// a `tool_result` block, the pairing Anthropic requires to accept a second
+/// loop iteration built from stored history.
+fn entry_json(entry: &Entry) -> Option<serde_json::Value> {
+    match entry {
+        Entry::Block(ContentBlock::Text(t)) => {
+            Some(serde_json::json!({ "type": "text", "text": t.text }))
+        }
+        Entry::Block(_) => None,
+        Entry::ToolCall(ToolInvocation {
+            id,
+            name,
+            arguments,
+        }) => Some(serde_json::json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": arguments,
+        })),
+        Entry::ToolResult { id, content } => Some(serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": id,
+            "content": tool_result_content_json(content),
+        })),
+    }
+}
+
+/// A turn's wire content: the plain string Anthropic expects when every entry
+/// is ordinary text (unchanged from before this task), or a content-block
+/// array once a turn carries a tool call or tool result.
+fn turn_content(turn: &Turn) -> serde_json::Value {
+    let all_text = turn
+        .entries
+        .iter()
+        .all(|e| matches!(e, Entry::Block(ContentBlock::Text(_))));
+    if all_text {
+        return serde_json::Value::String(turn_text(turn));
+    }
+    serde_json::Value::Array(turn.entries.iter().filter_map(entry_json).collect())
+}
+
 /// Build the Messages API request body from role-tagged turns. Pure.
 ///
-/// Only `Entry::Block` is mapped (via `turn_text`); `Entry::ToolCall` and
-/// `Entry::ToolResult` are not yet encoded onto Anthropic's `tool_use` /
-/// `tool_result` wire shape — that lands in Task 10.
-pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
+/// `tools` is omitted from the body entirely when empty — an empty `tools: []`
+/// array is not the same fact to a model as no tools being registered.
+pub(crate) fn request_body(model: &str, turns: &[Turn], tools: &[ToolSchema]) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = turns
         .iter()
         .map(|t| {
@@ -63,15 +151,19 @@ pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            serde_json::json!({ "role": role, "content": turn_text(t) })
+            serde_json::json!({ "role": role, "content": turn_content(t) })
         })
         .collect();
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
         "stream": true,
         "messages": messages,
-    })
+    });
+    if !tools.is_empty() {
+        body["tools"] = tools_json(tools);
+    }
+    body
 }
 
 /// Parse one SSE `data:` payload into text or a surfaced error. Pure.
@@ -81,12 +173,43 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     };
     let mut out = Vec::new();
     match v.get("type").and_then(|t| t.as_str()) {
+        Some("content_block_start") => {
+            if let Some(index) = v.get("index").and_then(|i| i.as_u64())
+                && let Some(cb) = v.get("content_block")
+                && cb.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && let Some(id) = cb.get("id").and_then(|i| i.as_str())
+                && let Some(name) = cb.get("name").and_then(|n| n.as_str())
+            {
+                out.push(SseItem::ToolCallStart {
+                    index: index as u32,
+                    id: id.to_string(),
+                    name: name.to_string(),
+                });
+            }
+        }
         Some("content_block_delta") => {
             if let Some(delta) = v.get("delta")
                 && delta.get("type").and_then(|t| t.as_str()) == Some("text_delta")
                 && let Some(text) = delta.get("text").and_then(|t| t.as_str())
             {
                 out.push(SseItem::Text(text.to_string()));
+            }
+            if let Some(index) = v.get("index").and_then(|i| i.as_u64())
+                && let Some(delta) = v.get("delta")
+                && delta.get("type").and_then(|t| t.as_str()) == Some("input_json_delta")
+                && let Some(json) = delta.get("partial_json").and_then(|j| j.as_str())
+            {
+                out.push(SseItem::ToolCallArgs {
+                    index: index as u32,
+                    json: json.to_string(),
+                });
+            }
+        }
+        Some("content_block_stop") => {
+            if let Some(index) = v.get("index").and_then(|i| i.as_u64()) {
+                out.push(SseItem::ToolCallEnd {
+                    index: index as u32,
+                });
             }
         }
         Some("message_start") => {
@@ -168,7 +291,7 @@ impl Agent for AnthropicAgent {
     async fn prompt(
         &self,
         ctx: Context,
-        _tools: &[ToolSchema],
+        tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         ensure_crypto_provider();
@@ -176,7 +299,7 @@ impl Agent for AnthropicAgent {
             .post(messages_url(&self.base))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", VERSION)
-            .json(&request_body(&self.model, &ctx.turns))
+            .json(&request_body(&self.model, &ctx.turns, tools))
             .send()
             .await
             .map_err(err)?;
@@ -213,7 +336,7 @@ mod tests {
 
     #[test]
     fn request_body_maps_single_user_turn() {
-        let body = request_body("claude-opus-4-8", &[u("hi")]);
+        let body = request_body("claude-opus-4-8", &[u("hi")], &[]);
         assert_eq!(body["model"], "claude-opus-4-8");
         assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "user");
@@ -222,11 +345,63 @@ mod tests {
 
     #[test]
     fn request_body_preserves_assistant_role() {
-        let body = request_body("m", &[u("q1"), a("a1"), u("q2")]);
+        let body = request_body("m", &[u("q1"), a("a1"), u("q2")], &[]);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][1]["content"], "a1");
         assert_eq!(body["messages"][2]["role"], "user");
+    }
+
+    #[test]
+    fn tools_json_uses_the_anthropic_envelope() {
+        use manch_protocol::acp::ToolKind;
+
+        let s = ToolSchema {
+            name: "search".into(),
+            description: "find".into(),
+            kind: ToolKind::Other,
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+        let v = tools_json(&[s]);
+        assert_eq!(v[0]["name"], "search");
+        assert_eq!(v[0]["description"], "find");
+        assert_eq!(v[0]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn request_body_encodes_a_tool_use_and_its_result() {
+        let turns = vec![
+            Turn {
+                role: Role::Assistant,
+                entries: vec![Entry::ToolCall(ToolInvocation {
+                    id: "c1".into(),
+                    name: "search".into(),
+                    arguments: serde_json::json!({"q":"asha"}),
+                })],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::ToolResult {
+                    id: "c1".into(),
+                    content: vec![crate::text_content("2 matches")],
+                }],
+            },
+        ];
+        let body = request_body("m", &turns, &[]);
+        assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
+        assert_eq!(body["messages"][0]["content"][0]["id"], "c1");
+        assert_eq!(body["messages"][0]["content"][0]["name"], "search");
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_result");
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "c1");
+    }
+
+    #[test]
+    fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
+        let body = request_body("m", &[u("hi")], &[]);
+        assert!(
+            body.get("tools").is_none(),
+            "an empty tools array changes model behaviour"
+        );
     }
 
     #[test]
@@ -260,6 +435,29 @@ mod tests {
         assert!(matches!(
             parse_line(d).as_slice(),
             [crate::SseItem::Usage(u)] if u.output_tokens == Some(25) && u.input_tokens.is_none()
+        ));
+    }
+
+    #[test]
+    fn parse_line_starts_a_tool_call_on_content_block_start() {
+        let d = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"search"}}"#;
+        assert!(matches!(parse_line(d).as_slice(),
+            [crate::SseItem::ToolCallStart { index: 0, id, name }] if id == "c1" && name == "search"));
+    }
+
+    #[test]
+    fn parse_line_accumulates_input_json_delta_fragments() {
+        let d = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}"#;
+        assert!(matches!(parse_line(d).as_slice(),
+            [crate::SseItem::ToolCallArgs { index: 0, json }] if json == "{\"a\":"));
+    }
+
+    #[test]
+    fn parse_line_ends_a_tool_call_on_content_block_stop() {
+        let d = r#"{"type":"content_block_stop","index":0}"#;
+        assert!(matches!(
+            parse_line(d).as_slice(),
+            [crate::SseItem::ToolCallEnd { index: 0 }]
         ));
     }
 

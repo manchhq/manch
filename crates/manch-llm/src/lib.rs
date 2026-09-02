@@ -1,11 +1,12 @@
 //! BYOK provider clients for Manch — direct provider HTTP/SSE, no execution surface.
 //! Each provider implements `manch_protocol::Agent` and emits ACP event vocabulary.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
 use manch_protocol::acp::{ContentBlock, StopReason};
-use manch_protocol::{AgentEvent, Entry, EventSink, Result, Turn, Usage};
+use manch_protocol::{AgentEvent, Entry, EventSink, Result, ToolInvocation, Turn, Usage};
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
@@ -29,12 +30,107 @@ pub struct ModelInfo {
     pub display_name: Option<String>,
 }
 
-/// One fact parsed out of an SSE line: streamed text, provider token counts, or
-/// a surfaced error message.
+/// One fact parsed out of an SSE line: streamed text, provider token counts, a
+/// surfaced error message, or one fragment of a streamed tool call.
+///
+/// A tool call arrives across several SSE frames (start, N argument-JSON
+/// fragments, end), but `parse_line` is a pure function of one line and must
+/// stay that way — so parsers emit these fragments and [`ToolAccum`], owned by
+/// [`stream_sse`] for the life of the stream, assembles them.
 pub(crate) enum SseItem {
     Text(String),
     Usage(Usage),
     Error(String),
+    /// A tool call has begun at `index` (the provider's stream slot).
+    ToolCallStart {
+        index: u32,
+        id: String,
+        name: String,
+    },
+    /// One fragment of the call's argument JSON at `index`, to be concatenated
+    /// in arrival order.
+    ToolCallArgs {
+        index: u32,
+        json: String,
+    },
+    /// The call at `index` is complete; its accumulated JSON is ready to parse.
+    ToolCallEnd {
+        index: u32,
+    },
+}
+
+/// Assembles streamed tool-call fragments into complete [`AgentEvent::ToolCall`]s.
+///
+/// Owned by [`stream_sse`] for the life of one stream — never by a parser,
+/// which must stay a pure function of one line. Keyed by the provider's
+/// stream `index` because a model may open several tool calls before closing
+/// any of them (interleaved calls).
+#[derive(Default)]
+pub(crate) struct ToolAccum {
+    /// index -> (id, name, accumulated argument JSON).
+    open: HashMap<u32, (String, String, String)>,
+}
+
+impl ToolAccum {
+    /// Feed one fragment. `ToolCallStart`/`ToolCallArgs` return `None` — a call
+    /// is only ever reported once assembled. `ToolCallEnd` removes the open
+    /// entry and returns the completed `AgentEvent::ToolCall`, parsing the
+    /// accumulated JSON (an empty accumulation means "no arguments", not
+    /// malformed, so it becomes `{}`). A malformed accumulation cannot panic —
+    /// `AgentEvent` has no error variant to carry a parse failure, so it
+    /// degrades to `Value::Null` rather than aborting the stream over one
+    /// unparsable call.
+    pub(crate) fn apply(&mut self, item: SseItem) -> Option<AgentEvent> {
+        match item {
+            SseItem::ToolCallStart { index, id, name } => {
+                self.open.insert(index, (id, name, String::new()));
+                None
+            }
+            SseItem::ToolCallArgs { index, json } => {
+                if let Some(entry) = self.open.get_mut(&index) {
+                    entry.2.push_str(&json);
+                }
+                None
+            }
+            SseItem::ToolCallEnd { index } => {
+                let (id, name, json) = self.open.remove(&index)?;
+                Some(AgentEvent::ToolCall(ToolInvocation {
+                    id,
+                    name,
+                    arguments: parse_tool_arguments(&json),
+                }))
+            }
+            SseItem::Text(_) | SseItem::Usage(_) | SseItem::Error(_) => None,
+        }
+    }
+
+    /// Complete every call still open when the stream ends (OpenAI never
+    /// marks an individual call finished; the stream ending is the only
+    /// signal). Drains the map, so calling `flush` twice cannot replay a call.
+    pub(crate) fn flush(&mut self) -> Vec<AgentEvent> {
+        self.open
+            .drain()
+            .map(|(_, (id, name, json))| {
+                AgentEvent::ToolCall(ToolInvocation {
+                    id,
+                    name,
+                    arguments: parse_tool_arguments(&json),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Parse a tool call's accumulated argument JSON. An empty accumulation means
+/// "no arguments" and becomes `{}`; a malformed accumulation cannot panic —
+/// `AgentEvent` has no error variant to carry a parse failure through, so it
+/// degrades to `Value::Null` rather than aborting the stream over one
+/// unparsable call.
+fn parse_tool_arguments(json: &str) -> serde_json::Value {
+    if json.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(json).unwrap_or(serde_json::Value::Null)
 }
 
 /// Drain complete `\n`-terminated lines from `buf`, applying `parse` to each
@@ -55,9 +151,10 @@ pub(crate) fn drain_sse(buf: &mut Vec<u8>, parse: impl Fn(&str) -> Vec<SseItem>)
 }
 
 /// Concatenate a turn's text blocks into one string. Non-text blocks and
-/// non-`Block` entries (a tool call is not prose) are ignored — multimodal
-/// message mapping, and wiring `ToolCall`/`ToolResult` onto the wire, are
-/// future work (Tasks 10-12).
+/// non-`Block` entries (a tool call is not prose) are ignored. Anthropic now
+/// wires `ToolCall`/`ToolResult` onto its own request shape when a turn
+/// carries one (see `anthropic::turn_content`); Gemini and OpenAI still fall
+/// back to this text-only mapping until Tasks 11-12.
 pub(crate) fn turn_text(turn: &Turn) -> String {
     turn.entries
         .iter()
@@ -172,12 +269,21 @@ pub(crate) fn item_to_event(item: SseItem) -> Result<AgentEvent> {
         SseItem::Text(t) => Ok(AgentEvent::text_chunk(t)),
         SseItem::Usage(u) => Ok(AgentEvent::Usage(u)),
         SseItem::Error(e) => Err(err(e)),
+        SseItem::ToolCallStart { .. }
+        | SseItem::ToolCallArgs { .. }
+        | SseItem::ToolCallEnd { .. } => {
+            unreachable!(
+                "tool call fragments are routed through ToolAccum in stream_sse, never item_to_event"
+            )
+        }
     }
 }
 
 /// Shared SSE streaming loop: decode byte chunks (splitting on `\n` so multibyte
 /// UTF-8 stays whole), drain complete lines through `parse`, emit text live,
-/// surface a parsed stream error, and emit `Done` when the stream ends.
+/// surface a parsed stream error, assemble streamed tool calls via a
+/// stream-lifetime [`ToolAccum`] (flushed — and any calls still open thereby
+/// completed — when the byte stream ends), and emit `Done` last.
 pub(crate) async fn stream_sse(
     resp: reqwest::Response,
     sink: &Arc<dyn EventSink>,
@@ -185,11 +291,24 @@ pub(crate) async fn stream_sse(
 ) -> Result<StopReason> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    let mut accum = ToolAccum::default();
     while let Some(chunk) = stream.next().await {
         buf.extend_from_slice(&chunk.map_err(err)?);
         for item in drain_sse(&mut buf, &parse) {
-            sink.emit(item_to_event(item)?).await?;
+            match item {
+                SseItem::ToolCallStart { .. }
+                | SseItem::ToolCallArgs { .. }
+                | SseItem::ToolCallEnd { .. } => {
+                    if let Some(ev) = accum.apply(item) {
+                        sink.emit(ev).await?;
+                    }
+                }
+                other => sink.emit(item_to_event(other)?).await?,
+            }
         }
+    }
+    for ev in accum.flush() {
+        sink.emit(ev).await?;
     }
     sink.emit(AgentEvent::Done(StopReason::EndTurn)).await?;
     Ok(StopReason::EndTurn)
@@ -220,6 +339,18 @@ pub async fn list_models_at(
     }
 }
 
+/// Wrap `s` as a standard-content [`acp::ToolCallContent`] — the common case a
+/// provider's tool result decodes into. A test fixture shared by every
+/// provider's test module (`crate::text_content`), not part of the feature
+/// under test.
+#[cfg(test)]
+pub(crate) fn text_content(s: &str) -> manch_protocol::acp::ToolCallContent {
+    use manch_protocol::acp::{Content, TextContent, ToolCallContent};
+    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+        s.to_string(),
+    ))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +362,109 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], SseItem::Text(s) if s == "{\"t\":1}"));
         assert_eq!(String::from_utf8_lossy(&buf), "data: partial"); // partial retained
+    }
+
+    #[test]
+    fn tool_accum_assembles_a_call_from_fragments() {
+        let mut acc = ToolAccum::default();
+        assert!(
+            acc.apply(SseItem::ToolCallStart {
+                index: 0,
+                id: "c1".into(),
+                name: "search".into()
+            })
+            .is_none()
+        );
+        assert!(
+            acc.apply(SseItem::ToolCallArgs {
+                index: 0,
+                json: "{\"na".into()
+            })
+            .is_none()
+        );
+        assert!(
+            acc.apply(SseItem::ToolCallArgs {
+                index: 0,
+                json: "me\":\"Asha\"}".into()
+            })
+            .is_none()
+        );
+        let ev = acc
+            .apply(SseItem::ToolCallEnd { index: 0 })
+            .expect("a completed call");
+        match ev {
+            AgentEvent::ToolCall(inv) => {
+                assert_eq!(inv.id, "c1");
+                assert_eq!(inv.name, "search");
+                assert_eq!(inv.arguments, serde_json::json!({ "name": "Asha" }));
+            }
+            _ => panic!("expected a tool call"),
+        }
+    }
+
+    #[test]
+    fn tool_accum_keeps_two_interleaved_calls_apart() {
+        let mut acc = ToolAccum::default();
+        acc.apply(SseItem::ToolCallStart {
+            index: 0,
+            id: "a".into(),
+            name: "one".into(),
+        });
+        acc.apply(SseItem::ToolCallStart {
+            index: 1,
+            id: "b".into(),
+            name: "two".into(),
+        });
+        acc.apply(SseItem::ToolCallArgs {
+            index: 1,
+            json: "{\"x\":2}".into(),
+        });
+        acc.apply(SseItem::ToolCallArgs {
+            index: 0,
+            json: "{\"x\":1}".into(),
+        });
+        let first = acc.apply(SseItem::ToolCallEnd { index: 0 }).unwrap();
+        match first {
+            AgentEvent::ToolCall(i) => assert_eq!(i.arguments, serde_json::json!({"x":1})),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn tool_accum_flushes_calls_left_open_at_stream_end() {
+        // OpenAI never marks an individual call finished, so the stream ending is
+        // the only signal. A pure parse_line cannot know which indexes are open.
+        let mut acc = ToolAccum::default();
+        acc.apply(SseItem::ToolCallStart {
+            index: 0,
+            id: "c1".into(),
+            name: "search".into(),
+        });
+        acc.apply(SseItem::ToolCallArgs {
+            index: 0,
+            json: "{\"q\":1}".into(),
+        });
+        let flushed = acc.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(
+            acc.flush().is_empty(),
+            "flushing twice must not replay the call"
+        );
+    }
+
+    #[test]
+    fn tool_accum_treats_empty_arguments_as_an_empty_object() {
+        let mut acc = ToolAccum::default();
+        acc.apply(SseItem::ToolCallStart {
+            index: 0,
+            id: "c".into(),
+            name: "n".into(),
+        });
+        let ev = acc.apply(SseItem::ToolCallEnd { index: 0 }).unwrap();
+        match ev {
+            AgentEvent::ToolCall(i) => assert_eq!(i.arguments, serde_json::json!({})),
+            _ => panic!(),
+        }
     }
 
     #[tokio::test]
