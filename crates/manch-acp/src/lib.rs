@@ -153,9 +153,11 @@ pub fn tool_status(status: ToolCallStatus) -> &'static str {
 /// crafted/untrustworthy and skipped, not selected — matching by id alone
 /// would let an agent offer `{option_id: "reject_once", kind: AllowAlways}`
 /// and have us pick it believing it denies the action, when the agent would
-/// actually act on the `AllowAlways` it declared. Falls back to `Cancelled`
-/// if the agent offered no trustworthy reject-kind option at all — never an
-/// allow.
+/// actually act on the `AllowAlways` it declared. An option whose id is
+/// shared with another option is skipped for the same reason: the id we send
+/// back could be resolved by the agent to its *allow* twin (ACP assumes id
+/// uniqueness but does not enforce it). Falls back to `Cancelled` if the
+/// agent offered no trustworthy reject-kind option at all — never an allow.
 pub(crate) async fn decide_permission(
     policy: Arc<dyn PermissionPolicy>,
     req: acp::RequestPermissionRequest,
@@ -175,31 +177,39 @@ pub(crate) async fn decide_permission(
 
     match policy.decide(&cx, &inv).await? {
         PermissionDecision::Resolved(outcome) => Ok(outcome),
-        PermissionDecision::Ask(_) => Ok(req
-            .options
-            .into_iter()
-            .find(|opt| {
-                let is_reject = matches!(
-                    opt.kind,
-                    acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways
-                );
-                // Trust the typed `kind` the agent declared, not our own
-                // guess from its id. If the id names a known kind that
-                // disagrees with the declared `kind`, the option is
-                // inconsistent — and therefore untrustworthy — so reject it
-                // outright rather than trusting either half.
-                let id_agrees = match kind_of(&opt.option_id) {
-                    Some(k) => k == opt.kind,
-                    None => true,
-                };
-                is_reject && id_agrees
-            })
-            .map(|opt| {
-                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                    opt.option_id,
-                ))
-            })
-            .unwrap_or(acp::RequestPermissionOutcome::Cancelled)),
+        PermissionDecision::Ask(_) => {
+            let options = req.options;
+            Ok(options
+                .iter()
+                .find(|opt| {
+                    let is_reject = matches!(
+                        opt.kind,
+                        acp::PermissionOptionKind::RejectOnce
+                            | acp::PermissionOptionKind::RejectAlways
+                    );
+                    // Trust the typed `kind` the agent declared, not our own
+                    // guess from its id. If the id names a known kind that
+                    // disagrees with the declared `kind`, the option is
+                    // inconsistent — and therefore untrustworthy — so reject it
+                    // outright rather than trusting either half.
+                    let id_agrees = kind_of(&opt.option_id).is_none_or(|k| k == opt.kind);
+                    // An id shared with another option is not an answer: the
+                    // agent could resolve the id we send back to its allow
+                    // entry. ACP assumes id uniqueness but does not enforce it.
+                    let id_unique = options
+                        .iter()
+                        .filter(|o| o.option_id == opt.option_id)
+                        .count()
+                        == 1;
+                    is_reject && id_agrees && id_unique
+                })
+                .map(|opt| {
+                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                        opt.option_id.clone(),
+                    ))
+                })
+                .unwrap_or(acp::RequestPermissionOutcome::Cancelled))
+        }
     }
 }
 
@@ -484,6 +494,36 @@ mod tests {
             .unwrap();
 
         assert!(matches!(decided, acp::RequestPermissionOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn an_option_id_shared_with_another_option_is_not_trusted() {
+        // Attack: two options share the id "x" — the first declares
+        // AllowAlways, the second RejectOnce. `kind_of("x")` is None, so the
+        // id-agreement check passes for both and `find` settles on the reject
+        // entry; we would answer Selected("x"). But the agent resolves that id
+        // against its OWN list, where "x" first names the allow entry — our
+        // deny becomes an allow. ACP assumes id uniqueness but does not
+        // enforce it, so a duplicated id is not an answer at all.
+        let allow = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("x"),
+            "Always allow",
+            acp::PermissionOptionKind::AllowAlways,
+        );
+        let reject = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("x"),
+            "Reject",
+            acp::PermissionOptionKind::RejectOnce,
+        );
+        let policy = Arc::new(RecordingPolicy::default());
+        let decided = decide_permission(policy, request_with_options(vec![allow, reject]))
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(decided, acp::RequestPermissionOutcome::Cancelled),
+            "expected Cancelled, got {decided:?}"
+        );
     }
 
     #[tokio::test]
