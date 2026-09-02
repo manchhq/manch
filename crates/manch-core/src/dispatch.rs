@@ -528,6 +528,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unrecognised_option_id_is_an_error_and_runs_nothing() {
+        // Deny-by-default on the resume path. `Manch::approve` is what a
+        // stateless server calls with whatever the client sent back, so an
+        // option id outside ACP's vocabulary must never be coerced into a
+        // kind — least of all an allow. It must error, and the pending tool
+        // must not run.
+        let (m, log, _store) = manch_with(
+            vec![tool_call("c1", "draft_prescription", json!({}))],
+            Tier::Draft,
+        );
+        let TurnOutcome::AwaitingApproval { pending, .. } = m
+            .handle("a", "s", user_msg("go"), ext(), sink())
+            .await
+            .unwrap()
+        else {
+            panic!("expected suspension")
+        };
+
+        let yolo = acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+            acp::PermissionOptionId::new("yolo"),
+        ));
+        let err = m
+            .approve("a", "s", ext(), pending, yolo, sink())
+            .await
+            .expect_err("an unrecognised option id is not consent");
+        assert!(
+            err.to_string().contains("yolo"),
+            "the error should name the offending id, got: {err}"
+        );
+        assert!(log.lock().unwrap().is_empty(), "the tool must not have run");
+    }
+
+    #[tokio::test]
     async fn a_rejected_call_reaches_the_model_as_a_result() {
         let (m, log, store) = manch_with(
             vec![tool_call("c1", "draft_prescription", json!({}))],
