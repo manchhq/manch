@@ -405,6 +405,20 @@ mod tests {
     }
 
     #[test]
+    fn request_body_includes_tools_when_provided() {
+        use manch_protocol::acp::ToolKind;
+
+        let s = ToolSchema {
+            name: "search".into(),
+            description: "find".into(),
+            kind: ToolKind::Other,
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+        let body = request_body("m", &[u("hi")], &[s]);
+        assert_eq!(body["tools"][0]["name"], "search");
+    }
+
+    #[test]
     fn parse_line_extracts_text_delta() {
         let d =
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;

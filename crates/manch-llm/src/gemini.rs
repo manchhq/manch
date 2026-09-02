@@ -3,8 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use manch_protocol::acp::StopReason;
-use manch_protocol::{Agent, Context, EventSink, Result, Role, ToolSchema, Turn};
+use manch_protocol::acp::{ContentBlock, StopReason, ToolCallContent};
+use manch_protocol::{
+    Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
+};
 
 use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
@@ -45,23 +47,140 @@ pub(crate) fn models_url(base: &str) -> String {
     format!("{base}/models")
 }
 
-/// Pure request body: role-tagged turns as Gemini `contents`.
-///
-/// Only `Entry::Block` is mapped (via `turn_text`); `Entry::ToolCall` and
-/// `Entry::ToolResult` are not yet encoded onto Gemini's `functionCall` /
-/// `functionResponse` wire shape — that lands in Task 12.
-pub(crate) fn request_body(turns: &[Turn]) -> serde_json::Value {
-    let contents: Vec<serde_json::Value> = turns
+/// Build the `tools` array Gemini expects: a single entry wrapping
+/// `functionDeclarations`, each `{ name, description, parameters }`.
+/// `parameters` is already the JSON Schema a `Tool` declares — only the
+/// envelope is Gemini-specific. Pure.
+pub(crate) fn tools_json(tools: &[ToolSchema]) -> serde_json::Value {
+    let declarations: Vec<serde_json::Value> = tools
         .iter()
         .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema,
+            })
+        })
+        .collect();
+    serde_json::json!([{ "functionDeclarations": declarations }])
+}
+
+/// Flatten one tool result's content blocks into the plain string wrapped
+/// into Gemini's `functionResponse.response`. Only the text case is
+/// meaningful on today's `Tool` surface; anything else (a future
+/// `Diff`/`Terminal` content kind) still serialises rather than panicking, so
+/// an unexpected content kind degrades instead of dropping the result.
+fn tool_result_text(content: &[ToolCallContent]) -> String {
+    content
+        .iter()
+        .map(|c| match c {
+            ToolCallContent::Content(inner) => match &inner.content {
+                ContentBlock::Text(t) => t.text.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            },
+            other => serde_json::to_string(other).unwrap_or_default(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Resolve a `ToolResult.id` back to the tool name Gemini's wire needs, by
+/// scanning the immediately preceding assistant turn's `Entry::ToolCall`
+/// entries for a matching id.
+///
+/// This lookup is exact — Manch's own turns still carry the id that pairs a
+/// result with its call. The genuine ambiguity is downstream of this
+/// function: Gemini's `functionResponse` carries only a `name`, no id, so if
+/// the same tool was called twice in one turn, the two resulting response
+/// parts are indistinguishable to Gemini once encoded. Nothing on this side
+/// can repair that — the best this function (and `request_body`) can do is
+/// preserve issue order, so response N lines up positionally with call N of
+/// that name.
+fn resolve_tool_name(turns: &[Turn], result_turn_index: usize, id: &str) -> Option<String> {
+    let assistant_turn = result_turn_index
+        .checked_sub(1)
+        .and_then(|i| turns.get(i))?;
+    assistant_turn.entries.iter().find_map(|e| match e {
+        Entry::ToolCall(ToolInvocation {
+            id: call_id, name, ..
+        }) if call_id == id => Some(name.clone()),
+        _ => None,
+    })
+}
+
+/// Map one turn entry onto a Gemini `parts` entry. `turns`/`turn_index` are
+/// needed only to resolve a `ToolResult`'s id back to its tool name (see
+/// [`resolve_tool_name`]).
+fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_json::Value> {
+    match entry {
+        Entry::Block(ContentBlock::Text(t)) => Some(serde_json::json!({ "text": t.text })),
+        Entry::Block(_) => None,
+        Entry::ToolCall(ToolInvocation {
+            name, arguments, ..
+        }) => Some(serde_json::json!({
+            "functionCall": { "name": name, "args": arguments },
+        })),
+        Entry::ToolResult { id, content } => {
+            let name = resolve_tool_name(turns, turn_index, id).unwrap_or_else(|| id.clone());
+            Some(serde_json::json!({
+                "functionResponse": {
+                    "name": name,
+                    "response": { "result": tool_result_text(content) },
+                },
+            }))
+        }
+    }
+}
+
+/// A turn's `parts` array: the single merged `{ "text": .. }` part Gemini
+/// expects when every entry is ordinary text (unchanged from before this
+/// task), or one part per entry once a turn carries a tool call or result.
+fn turn_parts(turn: &Turn, turns: &[Turn], turn_index: usize) -> Vec<serde_json::Value> {
+    let all_text = turn
+        .entries
+        .iter()
+        .all(|e| matches!(e, Entry::Block(ContentBlock::Text(_))));
+    if all_text {
+        return vec![serde_json::json!({ "text": turn_text(turn) })];
+    }
+    turn.entries
+        .iter()
+        .filter_map(|e| entry_part(e, turns, turn_index))
+        .collect()
+}
+
+/// Pure request body: role-tagged turns as Gemini `contents`, with
+/// `Entry::ToolCall`/`Entry::ToolResult` encoded onto `functionCall` /
+/// `functionResponse` parts.
+///
+/// `tools` is omitted from the body entirely when empty — an empty `tools: []`
+/// array is not the same fact to a model as no tools being registered.
+///
+/// Encoding a `ToolResult` requires resolving its id back to a tool *name*
+/// (see [`resolve_tool_name`]) because Gemini keys `functionResponse` by name,
+/// not id. When the same tool is called twice in one turn, the resulting wire
+/// representation is genuinely ambiguous — two `functionResponse` parts with
+/// the same name, and no id to tell them apart — which is a limitation of
+/// Gemini's wire format, not something this function can resolve. Preserving
+/// issue order (never reordering or merging) is the best available reading of
+/// a wire format that cannot express the distinction.
+pub(crate) fn request_body(turns: &[Turn], tools: &[ToolSchema]) -> serde_json::Value {
+    let contents: Vec<serde_json::Value> = turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
             let role = match t.role {
                 Role::User => "user",
                 Role::Assistant => "model",
             };
-            serde_json::json!({ "role": role, "parts": [{ "text": turn_text(t) }] })
+            serde_json::json!({ "role": role, "parts": turn_parts(t, turns, i) })
         })
         .collect();
-    serde_json::json!({ "contents": contents })
+    let mut body = serde_json::json!({ "contents": contents });
+    if !tools.is_empty() {
+        body["tools"] = tools_json(tools);
+    }
+    body
 }
 
 /// Parse one SSE line: concatenate the candidate's text parts, or surface an error. Pure.
@@ -77,23 +196,53 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
         return vec![SseItem::Error(format!("gemini: {msg}"))];
     }
     let mut out = Vec::new();
-    let text: String = v
+    let parts = v
         .get("candidates")
         .and_then(|c| c.as_array())
         .and_then(|c| c.first())
         .and_then(|c| c.get("content"))
         .and_then(|c| c.get("parts"))
-        .and_then(|p| p.as_array())
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
-    if !text.is_empty() {
-        out.push(SseItem::Text(text));
+        .and_then(|p| p.as_array());
+
+    if let Some(parts) = parts {
+        let text: String = parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if !text.is_empty() {
+            out.push(SseItem::Text(text));
+        }
+
+        // A `functionCall` arrives complete in a single part — unlike
+        // Anthropic/OpenAI, there is no fragmentation across frames — so one
+        // part yields a start/args/end triple in one shot, and Gemini
+        // supplies no call id, so one is synthesised from the part's
+        // position so a repeat call in the same turn still gets a distinct id.
+        for (index, part) in parts.iter().enumerate() {
+            let Some(call) = part.get("functionCall") else {
+                continue;
+            };
+            let index = index as u32;
+            let name = call
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let args = call.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let id = format!("gemini-{name}-{index}");
+            out.push(SseItem::ToolCallStart {
+                index,
+                id,
+                name: name.clone(),
+            });
+            out.push(SseItem::ToolCallArgs {
+                index,
+                json: args.to_string(),
+            });
+            out.push(SseItem::ToolCallEnd { index });
+        }
     }
+
     if let Some(u) = v.get("usageMetadata") {
         out.push(SseItem::Usage(manch_protocol::Usage {
             input_tokens: token_count(u, "promptTokenCount"),
@@ -166,14 +315,14 @@ impl Agent for GeminiAgent {
     async fn prompt(
         &self,
         ctx: Context,
-        _tools: &[ToolSchema],
+        tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         ensure_crypto_provider();
         let resp = reqwest::Client::new()
             .post(stream_url(&self.base, &self.model))
             .header("x-goog-api-key", &self.api_key)
-            .json(&request_body(&ctx.turns))
+            .json(&request_body(&ctx.turns, tools))
             .send()
             .await
             .map_err(err)?;
@@ -210,16 +359,115 @@ mod tests {
 
     #[test]
     fn request_body_maps_single_user_turn() {
-        let body = request_body(&[u("hi")]);
+        let body = request_body(&[u("hi")], &[]);
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
     }
 
     #[test]
     fn request_body_maps_assistant_to_model_role() {
-        let body = request_body(&[u("q1"), a("a1")]);
+        let body = request_body(&[u("q1"), a("a1")], &[]);
         assert_eq!(body["contents"][1]["role"], "model");
         assert_eq!(body["contents"][1]["parts"][0]["text"], "a1");
+    }
+
+    #[test]
+    fn tools_json_wraps_declarations_in_a_single_tools_entry() {
+        use manch_protocol::acp::ToolKind;
+
+        let s = ToolSchema {
+            name: "search".into(),
+            description: "find".into(),
+            kind: ToolKind::Other,
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+        let v = tools_json(&[s]);
+        assert_eq!(v[0]["functionDeclarations"][0]["name"], "search");
+        assert_eq!(
+            v[0]["functionDeclarations"][0]["parameters"]["type"],
+            "object"
+        );
+    }
+
+    #[test]
+    fn parse_line_emits_a_complete_call_as_start_args_and_end() {
+        // Gemini sends the whole call in one part, so one frame yields all three
+        // fragments and ToolAccum completes it immediately.
+        let d = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"asha"}}}]}}]}"#;
+        let items = parse_line(d);
+        assert!(matches!(items.as_slice(), [
+            crate::SseItem::ToolCallStart { name, .. },
+            crate::SseItem::ToolCallArgs { .. },
+            crate::SseItem::ToolCallEnd { .. }
+        ] if name == "search"));
+    }
+
+    #[test]
+    fn a_gemini_call_gets_a_synthesised_id() {
+        let d = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{}}}]}}]}"#;
+        match parse_line(d).as_slice() {
+            [crate::SseItem::ToolCallStart { id, .. }, ..] => assert!(
+                !id.is_empty(),
+                "Gemini supplies no id; Manch must synthesise one so results can be paired"
+            ),
+            _ => panic!("expected a tool call start"),
+        }
+    }
+
+    #[test]
+    fn request_body_encodes_function_call_and_response_parts() {
+        let turns = vec![
+            Turn {
+                role: Role::Assistant,
+                entries: vec![Entry::ToolCall(ToolInvocation {
+                    id: "c1".into(),
+                    name: "search".into(),
+                    arguments: serde_json::json!({"q":"asha"}),
+                })],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::ToolResult {
+                    id: "c1".into(),
+                    content: vec![crate::text_content("2 matches")],
+                }],
+            },
+        ];
+        let body = request_body(&turns, &[]);
+        assert_eq!(
+            body["contents"][0]["parts"][0]["functionCall"]["name"],
+            "search"
+        );
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["name"], "search",
+            "Gemini keys results by name, not by id"
+        );
+    }
+
+    #[test]
+    fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
+        let body = request_body(&[u("hi")], &[]);
+        assert!(
+            body.get("tools").is_none(),
+            "an empty tools array changes model behaviour"
+        );
+    }
+
+    #[test]
+    fn request_body_includes_tools_when_provided() {
+        use manch_protocol::acp::ToolKind;
+
+        let s = ToolSchema {
+            name: "search".into(),
+            description: "find".into(),
+            kind: ToolKind::Other,
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+        let body = request_body(&[u("hi")], &[s]);
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "search"
+        );
     }
 
     #[test]

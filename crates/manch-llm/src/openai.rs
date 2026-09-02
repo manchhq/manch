@@ -478,6 +478,20 @@ mod tests {
     }
 
     #[test]
+    fn request_body_includes_tools_when_provided() {
+        use manch_protocol::acp::ToolKind;
+
+        let s = ToolSchema {
+            name: "search".into(),
+            description: "find".into(),
+            kind: ToolKind::Other,
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+        let body = request_body("m", &[u("hi")], &[s]);
+        assert_eq!(body["tools"][0]["function"]["name"], "search");
+    }
+
+    #[test]
     fn new_defaults_to_the_vendor_base() {
         assert_eq!(OpenAiAgent::new("k".into(), None).base, DEFAULT_BASE);
     }
