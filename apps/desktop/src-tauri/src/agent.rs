@@ -43,8 +43,9 @@ impl ChannelSink {
 }
 
 /// Pure `AgentEvent` → `StreamEvent` mapping. Returns `None` for events the UI
-/// stream doesn't surface (e.g. the BYOK-only `AgentEvent::ToolCall`). Kept free
-/// of the Tauri `Channel` so it can be unit-tested in isolation.
+/// stream doesn't surface (currently only `AgentEvent::Usage`, since spend
+/// display isn't built yet). Kept free of the Tauri `Channel` so it can be
+/// unit-tested in isolation.
 pub fn map_event(event: AgentEvent) -> Option<StreamEvent> {
     match event {
         AgentEvent::Update(SessionUpdate::AgentMessageChunk(chunk)) => match chunk.content {
@@ -63,8 +64,25 @@ pub fn map_event(event: AgentEvent) -> Option<StreamEvent> {
             status: u.fields.status.map(tool_status).unwrap_or("running").into(),
             detail: None,
         }),
+        // `SessionUpdate` is `#[non_exhaustive]` (it's ACP's own type), so a
+        // wildcard is required here even though every `AgentEvent` variant
+        // above is matched explicitly. Other update kinds (plan, available
+        // commands, …) aren't surfaced yet.
+        AgentEvent::Update(_) => None,
         AgentEvent::Done(_) => Some(StreamEvent::Done),
-        _ => None,
+        // BYOK-only: a host-registered tool the runtime is about to dispatch.
+        // Surface it as a running tool so the UI can show activity while the
+        // call (and any approval round-trip) is in flight.
+        AgentEvent::ToolCall(inv) => Some(StreamEvent::Tool {
+            id: inv.id,
+            name: inv.name,
+            status: "running".into(),
+            detail: None,
+        }),
+        // Spend display is not built yet — dropped deliberately, not by
+        // omission. Explicit (not a catch-all) so a future `AgentEvent`
+        // variant fails to compile here instead of being silently dropped.
+        AgentEvent::Usage(_) => None,
     }
 }
 
@@ -149,5 +167,26 @@ mod tests {
             map_event(AgentEvent::Done(StopReason::EndTurn)),
             Some(StreamEvent::Done)
         ));
+    }
+
+    #[test]
+    fn a_host_tool_call_maps_to_a_tool_stream_event() {
+        use manch_protocol::ToolInvocation;
+
+        let ev = AgentEvent::ToolCall(ToolInvocation {
+            id: "c1".into(),
+            name: "search_patients".into(),
+            arguments: serde_json::json!({}),
+        });
+        match map_event(ev) {
+            Some(StreamEvent::Tool {
+                id, name, status, ..
+            }) => {
+                assert_eq!(id, "c1");
+                assert_eq!(name, "search_patients");
+                assert_eq!(status, "running");
+            }
+            other => panic!("expected a Tool event, got {other:?}"),
+        }
     }
 }
