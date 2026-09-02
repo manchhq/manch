@@ -42,7 +42,7 @@ pub enum PermissionDecision {
     Resolved(acp::RequestPermissionOutcome),
 }
 
-/// **Extension point.** Decides whether (and how) a human is asked before a
+/// **Extension point 5.** Decides whether (and how) a human is asked before a
 /// [`Tier::Draft`](crate::Tier) tool executes.
 ///
 /// Manch does not decide permission posture for consumers it has not met — it
@@ -103,9 +103,11 @@ impl PermissionPolicy for AskOncePolicy {
     }
 }
 
-/// **Extension point.** A blocking convenience for a consumer that can hold a
-/// call open across a human decision — a desktop or CLI app, not a stateless
-/// server.
+/// **A convenience interface, not an extension point.** A blocking wrapper
+/// for a consumer that can hold a call open across a human decision — a
+/// desktop or CLI app, not a stateless server. It adds no capability the five
+/// extension points do not already have; it only changes the shape in which a
+/// consumer consumes one of them.
 ///
 /// Suspend/resume (`TurnOutcome::AwaitingApproval` / `Manch::approve`) stays
 /// the primitive: it is the more general of the two shapes, because a

@@ -120,9 +120,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tool_is_dispatched_by_schema_name_not_by_display_title() {
-        // The registry keys on schema().name. A tool whose human-readable title
-        // differs from its name must still be reachable.
+    async fn a_tool_is_dispatched_by_its_schema_name() {
+        // The registry keys on schema().name — never on anything the model
+        // chose. `ToolInvocation` has no display field at all, so a name/title
+        // mismatch is not even representable; what this pins is that dispatch
+        // goes through the schema name and reaches the registered tool.
         let log = Arc::new(Mutex::new(Vec::new()));
         let store = Arc::new(MemStore::new());
         let manch = Manch::builder()

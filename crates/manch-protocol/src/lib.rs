@@ -1,9 +1,13 @@
 //! # manch-protocol
 //!
-//! The contracts for [Manch](https://github.com/manchhq/manch): the five traits
-//! every consumer implements to extend the substrate — [`Agent`], [`Tool`],
-//! [`Channel`], [`MemoryStore`], and [`PermissionPolicy`] — plus the shared
-//! message/event vocabulary.
+//! The contracts for [Manch](https://github.com/manchhq/manch): the five
+//! extension points every consumer implements to extend the substrate —
+//! [`Agent`] (1), [`Tool`] (2), [`Channel`] (3), [`MemoryStore`] (4) and
+//! [`PermissionPolicy`] (5) — plus the shared message/event vocabulary.
+//!
+//! [`Approver`] is *not* a sixth: it is a blocking convenience over the
+//! suspend/resume primitive, for consumers that can hold a call open across a
+//! human decision.
 //!
 //! ## We build on ACP, we do not reinvent it
 //!
@@ -169,7 +173,12 @@ pub trait EventSink: Send + Sync {
     async fn emit(&self, event: AgentEvent) -> Result<()>;
 }
 
-// ── The four extension points ───────────────────────────────────────────────
+// ── The extension points ────────────────────────────────────────────────────
+//
+// Five in total, numbered in the order the crate docs and README list them:
+// 1 `Agent` and 3 `Channel` are declared here; 2 [`Tool`] lives in `tool.rs`,
+// 4 [`MemoryStore`] in `memory.rs`, and 5 [`PermissionPolicy`] in
+// `permission.rs`.
 
 /// **Extension point 1.** How a model/agent is invoked and streams events back.
 ///
