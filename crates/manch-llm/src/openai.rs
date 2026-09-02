@@ -48,6 +48,9 @@ pub(crate) fn models_url(base: &str) -> String {
     format!("{base}/models")
 }
 
+/// Only `Entry::Block` is mapped (via `turn_text`); `Entry::ToolCall` and
+/// `Entry::ToolResult` are not yet encoded onto OpenAI's `tool_calls` /
+/// `tool` message wire shape — that lands in Task 11.
 pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = turns
         .iter()
@@ -199,18 +202,22 @@ impl Agent for OpenAiAgent {
 mod tests {
     use super::*;
     use manch_protocol::acp::{ContentBlock, TextContent};
-    use manch_protocol::{Role, Turn};
+    use manch_protocol::{Entry, Role, Turn};
 
     fn u(text: &str) -> Turn {
         Turn {
             role: Role::User,
-            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
         }
     }
     fn a(text: &str) -> Turn {
         Turn {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
         }
     }
 

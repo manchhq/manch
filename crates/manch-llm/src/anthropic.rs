@@ -51,6 +51,10 @@ pub(crate) fn models_url(base: &str) -> String {
 }
 
 /// Build the Messages API request body from role-tagged turns. Pure.
+///
+/// Only `Entry::Block` is mapped (via `turn_text`); `Entry::ToolCall` and
+/// `Entry::ToolResult` are not yet encoded onto Anthropic's `tool_use` /
+/// `tool_result` wire shape — that lands in Task 10.
 pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = turns
         .iter()
@@ -188,18 +192,22 @@ impl Agent for AnthropicAgent {
 mod tests {
     use super::*;
     use manch_protocol::acp::{ContentBlock, TextContent};
-    use manch_protocol::{Role, Turn};
+    use manch_protocol::{Entry, Role, Turn};
 
     fn u(text: &str) -> Turn {
         Turn {
             role: Role::User,
-            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
         }
     }
     fn a(text: &str) -> Turn {
         Turn {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
         }
     }
 

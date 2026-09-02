@@ -142,12 +142,23 @@ impl Agent for AcpCliAgent {
         // in-session history, so send only the current (trailing) user turn —
         // never feed the agent its own prior assistant replies as user input.
         // Single-turn (#5) has exactly one user turn, so this is unchanged there.
+        // Tool calls/results have no slot in ACP's role-less ContentBlock
+        // vocabulary and don't apply on this path anyway (host tools are
+        // BYOK-only — see crate docs), so only `Entry::Block` entries are sent.
         let blocks = ctx
             .turns
             .into_iter()
             .rev()
             .find(|t| t.role == Role::User)
-            .map(|t| t.blocks)
+            .map(|t| {
+                t.entries
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        manch_protocol::Entry::Block(b) => Some(b),
+                        _ => None,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         let id = self.id;
 

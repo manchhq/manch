@@ -7,7 +7,8 @@ use manch_protocol::acp::{
     Content, ContentBlock, StopReason, TextContent, ToolCallContent, ToolKind,
 };
 use manch_protocol::{
-    Agent, AgentEvent, Context, EventSink, MemoryStore, Result, Tier, Tool, ToolContext, ToolSchema,
+    Agent, AgentEvent, Context, Entry, EventSink, MemoryStore, Result, Tier, Tool, ToolContext,
+    ToolSchema,
 };
 use manch_protocol::{Role, coalesce_turns};
 
@@ -125,11 +126,11 @@ pub fn text_content(s: &str) -> ToolCallContent {
     ))))
 }
 
-/// A `MemoryStore` backed by an in-memory Vec of role-tagged blocks.
+/// A `MemoryStore` backed by an in-memory Vec of role-tagged entries.
 /// `assemble_context` coalesces them into turns — the "dumbest strategy" #3
 /// will also ship first.
 pub struct VecStore {
-    entries: Mutex<Vec<(Role, ContentBlock)>>,
+    entries: Mutex<Vec<(Role, Entry)>>,
 }
 
 impl VecStore {
@@ -138,7 +139,7 @@ impl VecStore {
             entries: Mutex::new(Vec::new()),
         }
     }
-    /// Number of raw appended blocks (not turns).
+    /// Number of raw appended entries (not turns).
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap().len()
     }
@@ -146,8 +147,8 @@ impl VecStore {
 
 #[async_trait]
 impl MemoryStore for VecStore {
-    async fn append(&self, _session_id: &str, role: Role, block: ContentBlock) -> Result<()> {
-        self.entries.lock().unwrap().push((role, block));
+    async fn append(&self, _session_id: &str, role: Role, entry: Entry) -> Result<()> {
+        self.entries.lock().unwrap().push((role, entry));
         Ok(())
     }
     async fn assemble_context(&self, session_id: &str) -> Result<Context> {

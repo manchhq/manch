@@ -53,7 +53,7 @@ mod memory;
 mod permission;
 mod tool;
 
-pub use memory::{MemoryStore, Turn, coalesce_turns};
+pub use memory::{Entry, MemoryStore, Turn, coalesce_turns};
 pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.

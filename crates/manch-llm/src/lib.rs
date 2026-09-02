@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use manch_protocol::acp::{ContentBlock, StopReason};
-use manch_protocol::{AgentEvent, EventSink, Result, Turn, Usage};
+use manch_protocol::{AgentEvent, Entry, EventSink, Result, Turn, Usage};
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
@@ -54,13 +54,15 @@ pub(crate) fn drain_sse(buf: &mut Vec<u8>, parse: impl Fn(&str) -> Vec<SseItem>)
     out
 }
 
-/// Concatenate a turn's text blocks into one string. Non-text blocks are
-/// ignored — multimodal message mapping is future work.
+/// Concatenate a turn's text blocks into one string. Non-text blocks and
+/// non-`Block` entries (a tool call is not prose) are ignored — multimodal
+/// message mapping, and wiring `ToolCall`/`ToolResult` onto the wire, are
+/// future work (Tasks 10-12).
 pub(crate) fn turn_text(turn: &Turn) -> String {
-    turn.blocks
+    turn.entries
         .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text(t) => Some(t.text.as_str()),
+        .filter_map(|e| match e {
+            Entry::Block(ContentBlock::Text(t)) => Some(t.text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -268,16 +270,36 @@ mod tests {
     #[test]
     fn turn_text_joins_multiple_text_blocks_with_newline() {
         use manch_protocol::acp::{ContentBlock, TextContent};
-        use manch_protocol::{Role, Turn};
+        use manch_protocol::{Entry, Role, Turn};
 
         let turn = Turn {
             role: Role::User,
-            blocks: vec![
-                ContentBlock::Text(TextContent::new("hello".to_string())),
-                ContentBlock::Text(TextContent::new("world".to_string())),
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new("hello".to_string()))),
+                Entry::Block(ContentBlock::Text(TextContent::new("world".to_string()))),
             ],
         };
         assert_eq!(turn_text(&turn), "hello\nworld");
+    }
+
+    #[test]
+    fn turn_text_ignores_non_block_entries() {
+        // A tool call is not prose; it must not leak into the text of a turn.
+        use manch_protocol::acp::{ContentBlock, TextContent};
+        use manch_protocol::{Entry, Role, ToolInvocation, Turn};
+
+        let turn = Turn {
+            role: Role::Assistant,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new("hello".to_string()))),
+                Entry::ToolCall(ToolInvocation {
+                    id: "c1".into(),
+                    name: "t".into(),
+                    arguments: serde_json::Value::Null,
+                }),
+            ],
+        };
+        assert_eq!(turn_text(&turn), "hello");
     }
 
     #[test]

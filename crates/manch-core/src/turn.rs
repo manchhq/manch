@@ -247,8 +247,8 @@ mod tests {
                 .count(),
             1
         );
-        // memory: user msg + tool result + assistant "done" appended.
-        assert_eq!(store.len(), 3);
+        // memory: user msg + assistant tool_call + tool result + assistant "done".
+        assert_eq!(store.len(), 4);
     }
 
     #[tokio::test]
@@ -318,8 +318,10 @@ mod tests {
         assert_eq!(ctx.turns.len(), 2);
         assert_eq!(ctx.turns[0].role, Role::User);
         assert_eq!(ctx.turns[1].role, Role::Assistant);
-        match &ctx.turns[1].blocks[0] {
-            ContentBlock::Text(t) => assert_eq!(t.text, "first reply"),
+        match &ctx.turns[1].entries[0] {
+            manch_protocol::Entry::Block(ContentBlock::Text(t)) => {
+                assert_eq!(t.text, "first reply")
+            }
             _ => panic!("expected assistant text"),
         }
 

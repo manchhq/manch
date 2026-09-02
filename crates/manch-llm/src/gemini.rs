@@ -46,6 +46,10 @@ pub(crate) fn models_url(base: &str) -> String {
 }
 
 /// Pure request body: role-tagged turns as Gemini `contents`.
+///
+/// Only `Entry::Block` is mapped (via `turn_text`); `Entry::ToolCall` and
+/// `Entry::ToolResult` are not yet encoded onto Gemini's `functionCall` /
+/// `functionResponse` wire shape — that lands in Task 12.
 pub(crate) fn request_body(turns: &[Turn]) -> serde_json::Value {
     let contents: Vec<serde_json::Value> = turns
         .iter()
@@ -185,18 +189,22 @@ impl Agent for GeminiAgent {
 mod tests {
     use super::*;
     use manch_protocol::acp::{ContentBlock, TextContent};
-    use manch_protocol::{Role, Turn};
+    use manch_protocol::{Entry, Role, Turn};
 
     fn u(text: &str) -> Turn {
         Turn {
             role: Role::User,
-            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
         }
     }
     fn a(text: &str) -> Turn {
         Turn {
             role: Role::Assistant,
-            blocks: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
         }
     }
 

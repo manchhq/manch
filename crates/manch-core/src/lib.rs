@@ -18,8 +18,8 @@ use async_trait::async_trait;
 pub use builder::ManchBuilder;
 use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
 use manch_protocol::{
-    Agent, AgentEvent, Channel, Error, EventSink, Extensions, MemoryStore, PromptHandler, Result,
-    Role, Tool, ToolContext, ToolSchema,
+    Agent, AgentEvent, Channel, Entry, Error, EventSink, Extensions, MemoryStore, PromptHandler,
+    Result, Role, Tool, ToolContext, ToolSchema,
 };
 use turn::InterceptSink;
 
@@ -58,11 +58,12 @@ impl Manch {
 #[async_trait]
 impl PromptHandler for Manch {
     // Persistence: inbound user blocks (User), the agent's own streamed text
-    // (Assistant, accumulated per sub-turn in `InterceptSink`), and host-tool
-    // results (User — Anthropic's "tool_result lives in a user turn" shape).
-    // The assistant `tool_use` request block is NOT persisted yet; proper
-    // tool_use/tool_result role pairing waits on a BYOK provider that emits
-    // tool calls (#22).
+    // (Assistant, accumulated per sub-turn in `InterceptSink`), the assistant's
+    // tool_use request (Assistant, `Entry::ToolCall`), and the host-tool's
+    // result (User, `Entry::ToolResult` — Anthropic's "tool_result lives in a
+    // user turn" shape). The `ToolCall` is appended *before* its `ToolResult`
+    // so a stored history is valid input for a second loop iteration —
+    // Anthropic rejects a `tool_result` with no preceding `tool_use`.
     async fn handle(
         &self,
         agent_id: &str,
@@ -77,7 +78,9 @@ impl PromptHandler for Manch {
             .clone();
 
         for block in message {
-            self.memory.append(session_id, Role::User, block).await?;
+            self.memory
+                .append(session_id, Role::User, Entry::Block(block))
+                .await?;
         }
 
         let schemas: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
@@ -92,7 +95,7 @@ impl PromptHandler for Manch {
                     .append(
                         session_id,
                         Role::Assistant,
-                        ContentBlock::Text(TextContent::new(text)),
+                        Entry::Block(ContentBlock::Text(TextContent::new(text))),
                     )
                     .await?;
             }
@@ -112,12 +115,24 @@ impl PromptHandler for Manch {
                     .tools
                     .get(&inv.name)
                     .ok_or_else(|| Error::NotFound(inv.name.clone()))?;
+                // Persist the request before dispatching it, so a mid-call error
+                // still leaves a valid tool_use/tool_result pairing in history.
+                self.memory
+                    .append(session_id, Role::Assistant, Entry::ToolCall(inv.clone()))
+                    .await?;
                 // Task 7 threads the caller's Extensions through `handle`; until then the
                 // context carries only what Manch itself knows.
                 let cx = ToolContext::new(session_id, &inv.id, Arc::new(Extensions::default()));
                 let result = tool.call(&cx, inv.arguments.clone()).await?;
                 self.memory
-                    .append(session_id, Role::User, tool_result_block(&inv, result))
+                    .append(
+                        session_id,
+                        Role::User,
+                        Entry::ToolResult {
+                            id: inv.id.clone(),
+                            content: vec![result],
+                        },
+                    )
                     .await?;
             }
         }
@@ -125,22 +140,5 @@ impl PromptHandler for Manch {
         Err(Error::Other(format!(
             "tool-call loop exceeded {MAX_TOOL_ITERS} iterations"
         )))
-    }
-}
-
-/// Turn a tool result into a `ContentBlock` for the next turn's context. A
-/// standard content result unwraps to its block; diff/terminal results (which a
-/// re-prompt can't consume directly) become a short text placeholder.
-fn tool_result_block(
-    inv: &manch_protocol::ToolInvocation,
-    result: manch_protocol::acp::ToolCallContent,
-) -> ContentBlock {
-    use manch_protocol::acp::{TextContent, ToolCallContent};
-    match result {
-        ToolCallContent::Content(c) => c.content,
-        _ => ContentBlock::Text(TextContent::new(format!(
-            "[tool {} returned a non-content result]",
-            inv.name
-        ))),
     }
 }
