@@ -122,11 +122,23 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
         .collect();
 
     let mut messages = Vec::new();
+    let has_block = turn.entries.iter().any(|e| matches!(e, Entry::Block(_)));
 
-    if !tool_calls.is_empty() {
+    // A narrated call ("let me look that up", then the call) rides on ONE
+    // assistant message. OpenAI requires the `tool` replies to *immediately*
+    // follow the message carrying `tool_calls`, so emitting the narration as a
+    // separate assistant message would both wedge an illegal message in between
+    // and reverse the real order. An assistant message may carry `content` and
+    // `tool_calls` together — that is the shape the API itself returns.
+    let absorbed = !tool_calls.is_empty();
+    if absorbed {
         messages.push(serde_json::json!({
             "role": "assistant",
-            "content": serde_json::Value::Null,
+            "content": if has_block {
+                serde_json::Value::String(turn_text(turn))
+            } else {
+                serde_json::Value::Null
+            },
             "tool_calls": tool_calls,
         }));
     }
@@ -141,8 +153,7 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
         }
     }
 
-    let has_block = turn.entries.iter().any(|e| matches!(e, Entry::Block(_)));
-    if has_block || messages.is_empty() {
+    if (has_block && !absorbed) || messages.is_empty() {
         messages.push(serde_json::json!({ "role": role, "content": turn_text(turn) }));
     }
 
@@ -466,6 +477,52 @@ mod tests {
         );
         assert_eq!(body["messages"][1]["role"], "tool");
         assert_eq!(body["messages"][1]["tool_call_id"], "c1");
+    }
+
+    #[test]
+    fn request_body_keeps_a_narrated_tool_call_in_one_assistant_message() {
+        // A model that says "let me look that up" before calling persists as
+        // [Block, ToolCall] in one turn. OpenAI requires the `tool` replies to
+        // immediately follow the assistant message carrying `tool_calls`, so the
+        // narration has to ride along on that same message rather than become a
+        // second assistant message wedged in between.
+        let turns = vec![
+            Turn {
+                role: Role::Assistant,
+                entries: vec![
+                    Entry::Block(ContentBlock::Text(TextContent::new(
+                        "Let me look that up.".to_string(),
+                    ))),
+                    Entry::ToolCall(ToolInvocation {
+                        id: "c1".into(),
+                        name: "search".into(),
+                        arguments: serde_json::json!({"q":"asha"}),
+                    }),
+                ],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::ToolResult {
+                    id: "c1".into(),
+                    content: vec![crate::text_content("2 matches")],
+                }],
+            },
+        ];
+        let body = request_body("m", &turns, &[]);
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            2,
+            "narration must not become a third message: {messages:#?}"
+        );
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "Let me look that up.");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "c1");
+        assert_eq!(
+            messages[1]["role"], "tool",
+            "the tool reply must be the very next message"
+        );
+        assert_eq!(messages[1]["tool_call_id"], "c1");
     }
 
     #[test]
