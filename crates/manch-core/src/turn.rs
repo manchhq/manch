@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use manch_protocol::acp::{ContentBlock, SessionUpdate, ToolCall};
-use manch_protocol::{AgentEvent, EventSink, Result};
+use manch_protocol::acp::{ContentBlock, SessionUpdate};
+use manch_protocol::{AgentEvent, EventSink, Result, ToolInvocation};
 
 /// Wraps the caller's sink for one sub-turn: streamed `Update`s pass through
 /// live, host-tool `ToolCall`s are captured for dispatch (not forwarded — they
@@ -10,7 +10,7 @@ use manch_protocol::{AgentEvent, EventSink, Result};
 /// swallowed (the runtime emits a single final `Done` for the whole exchange).
 pub(crate) struct InterceptSink {
     inner: Arc<dyn EventSink>,
-    captured: Mutex<Vec<ToolCall>>,
+    captured: Mutex<Vec<ToolInvocation>>,
     text: Mutex<String>,
 }
 
@@ -23,7 +23,7 @@ impl InterceptSink {
         }
     }
     /// Drain the tool calls captured during the sub-turn.
-    pub(crate) fn take_calls(&self) -> Vec<ToolCall> {
+    pub(crate) fn take_calls(&self) -> Vec<ToolInvocation> {
         std::mem::take(&mut self.captured.lock().unwrap())
     }
     /// Drain the assistant text accumulated during the sub-turn (`None` if the
@@ -42,8 +42,8 @@ impl InterceptSink {
 impl EventSink for InterceptSink {
     async fn emit(&self, event: AgentEvent) -> Result<()> {
         match event {
-            AgentEvent::ToolCall(tc) => {
-                self.captured.lock().unwrap().push(tc);
+            AgentEvent::ToolCall(inv) => {
+                self.captured.lock().unwrap().push(inv);
                 Ok(())
             }
             AgentEvent::Done(_) => Ok(()),
@@ -71,14 +71,16 @@ impl EventSink for InterceptSink {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use manch_protocol::PromptHandler;
-    use manch_protocol::acp::{ContentBlock, StopReason, TextContent, ToolCall};
-    use manch_protocol::{AgentEvent, Error, EventSink, MemoryStore, Role, Usage};
+    use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
+    use manch_protocol::{
+        AgentEvent, Error, EventSink, MemoryStore, Role, Tier, Tool, ToolInvocation, Usage,
+    };
 
     use crate::Manch;
-    use crate::testing::{CollectSink, ScriptAgent, VecStore};
+    use crate::testing::{CollectSink, EchoTool, ScriptAgent, VecStore};
 
     #[tokio::test]
     async fn intercept_sink_forwards_usage_to_the_caller() {
@@ -103,9 +105,52 @@ mod tests {
 
     /// Build an `AgentEvent::ToolCall` addressed to a registered tool by name.
     fn tool_call(name: &str) -> AgentEvent {
-        let mut tc = ToolCall::new(format!("call-{name}"), name.to_string());
-        tc.raw_input = Some(serde_json::json!({ "x": 1 }));
-        AgentEvent::ToolCall(tc)
+        AgentEvent::ToolCall(ToolInvocation {
+            id: format!("call-{name}"),
+            name: name.to_string(),
+            arguments: serde_json::json!({ "x": 1 }),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_tool_is_dispatched_by_schema_name_not_by_display_title() {
+        // The registry keys on schema().name. A tool whose human-readable title
+        // differs from its name must still be reachable.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(VecStore::new()); // renamed to MemStore in Task 5
+        let manch = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new(
+                "a",
+                vec![
+                    vec![AgentEvent::ToolCall(ToolInvocation {
+                        id: "call-1".into(),
+                        name: "search_patients".into(),
+                        arguments: serde_json::json!({ "name": "Asha" }),
+                    })],
+                    vec![AgentEvent::text_chunk("done")],
+                ],
+            )))
+            .tool(Arc::new(EchoTool::new(
+                "search_patients",
+                Tier::Read,
+                log.clone(),
+            )))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+
+        let sink = Arc::new(CollectSink::new());
+        manch
+            .handle("a", "s", user_msg("find asha"), sink)
+            .await
+            .unwrap();
+        assert!(log.lock().unwrap().contains(&"search_patients".to_string()));
+    }
+
+    #[test]
+    fn tier_is_declared_per_tool() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        assert_eq!(EchoTool::new("t", Tier::Draft, log).tier(), Tier::Draft);
     }
 
     #[tokio::test]
@@ -165,9 +210,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_is_dispatched_then_reprompted() {
-        use crate::testing::EchoTool;
-        let echo = EchoTool::new("echo");
-        let calls = echo.calls.clone();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let echo = EchoTool::new("echo", Tier::Read, log.clone());
         // turn 1: emit a tool call. turn 2: finish with text + Done.
         let agent = ScriptAgent::new(
             "a",
@@ -193,7 +237,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(*calls.lock().unwrap(), 1); // tool ran once
+        assert_eq!(*log.lock().unwrap(), vec!["echo".to_string()]); // tool ran once
         let evs = sink.events();
         // caller never sees a raw ToolCall event; sees the turn-2 text + one Done.
         assert!(!evs.iter().any(|e| matches!(e, AgentEvent::ToolCall(_))));
@@ -292,12 +336,12 @@ mod tests {
 
     #[tokio::test]
     async fn endless_tool_calls_hit_the_iteration_cap() {
-        use crate::testing::EchoTool;
         // every turn emits a tool call → never terminates on its own.
         let turns: Vec<Vec<AgentEvent>> = (0..32).map(|_| vec![tool_call("echo")]).collect();
+        let log = Arc::new(Mutex::new(Vec::new()));
         let manch = Manch::builder()
             .agent(Arc::new(ScriptAgent::new("a", turns)))
-            .tool(Arc::new(EchoTool::new("echo")))
+            .tool(Arc::new(EchoTool::new("echo", Tier::Read, log)))
             .memory(Arc::new(VecStore::new()))
             .build()
             .unwrap();

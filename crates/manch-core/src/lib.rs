@@ -18,8 +18,8 @@ use async_trait::async_trait;
 pub use builder::ManchBuilder;
 use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
 use manch_protocol::{
-    Agent, AgentEvent, Channel, Error, EventSink, MemoryStore, PromptHandler, Result, Role, Tool,
-    ToolSchema,
+    Agent, AgentEvent, Channel, Error, EventSink, Extensions, MemoryStore, PromptHandler, Result,
+    Role, Tool, ToolContext, ToolSchema,
 };
 use turn::InterceptSink;
 
@@ -107,18 +107,17 @@ impl PromptHandler for Manch {
             // if a turn emits multiple tool calls and a later one errors, the
             // earlier results in this batch are already appended to memory
             // before the `?` below propagates the error.
-            for mut tc in calls {
-                // Provisional host-tool convention: the tool name is the ACP
-                // ToolCall's `title`, args are `raw_input`. (Unexercised by #5;
-                // no BYOK agent emits ToolCall yet. See the spec.)
+            for inv in calls {
                 let tool = self
                     .tools
-                    .get(&tc.title)
-                    .ok_or_else(|| Error::NotFound(tc.title.clone()))?;
-                let args = tc.raw_input.take().unwrap_or(serde_json::Value::Null);
-                let result = tool.call(args).await?;
+                    .get(&inv.name)
+                    .ok_or_else(|| Error::NotFound(inv.name.clone()))?;
+                // Task 7 threads the caller's Extensions through `handle`; until then the
+                // context carries only what Manch itself knows.
+                let cx = ToolContext::new(session_id, &inv.id, Arc::new(Extensions::default()));
+                let result = tool.call(&cx, inv.arguments.clone()).await?;
                 self.memory
-                    .append(session_id, Role::User, tool_result_block(&tc, result))
+                    .append(session_id, Role::User, tool_result_block(&inv, result))
                     .await?;
             }
         }
@@ -133,7 +132,7 @@ impl PromptHandler for Manch {
 /// standard content result unwraps to its block; diff/terminal results (which a
 /// re-prompt can't consume directly) become a short text placeholder.
 fn tool_result_block(
-    tc: &manch_protocol::acp::ToolCall,
+    inv: &manch_protocol::ToolInvocation,
     result: manch_protocol::acp::ToolCallContent,
 ) -> ContentBlock {
     use manch_protocol::acp::{TextContent, ToolCallContent};
@@ -141,7 +140,7 @@ fn tool_result_block(
         ToolCallContent::Content(c) => c.content,
         _ => ContentBlock::Text(TextContent::new(format!(
             "[tool {} returned a non-content result]",
-            tc.title
+            inv.name
         ))),
     }
 }

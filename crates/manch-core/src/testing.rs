@@ -3,9 +3,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use manch_protocol::acp::{ContentBlock, StopReason, TextContent, ToolCallContent, ToolKind};
+use manch_protocol::acp::{
+    Content, ContentBlock, StopReason, TextContent, ToolCallContent, ToolKind,
+};
 use manch_protocol::{
-    Agent, AgentEvent, Context, EventSink, MemoryStore, Result, Tool, ToolSchema,
+    Agent, AgentEvent, Context, EventSink, MemoryStore, Result, Tier, Tool, ToolContext, ToolSchema,
 };
 use manch_protocol::{Role, coalesce_turns};
 
@@ -44,17 +46,21 @@ impl Agent for ScriptAgent {
     }
 }
 
-/// A `Tool` that echoes a fixed text result and counts its invocations.
+/// A `Tool` that records every call into a caller-owned log. The log is
+/// injected rather than global so tests running in parallel cannot see each
+/// other's calls.
 pub struct EchoTool {
-    name: &'static str,
-    pub calls: Arc<Mutex<usize>>,
+    name: String,
+    tier: Tier,
+    log: Arc<Mutex<Vec<String>>>,
 }
 
 impl EchoTool {
-    pub fn new(name: &'static str) -> Self {
+    pub fn new(name: &str, tier: Tier, log: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
-            name,
-            calls: Arc::new(Mutex::new(0)),
+            name: name.to_string(),
+            tier,
+            log,
         }
     }
 }
@@ -63,16 +69,19 @@ impl EchoTool {
 impl Tool for EchoTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: self.name.to_string(),
-            description: "echo".to_string(),
-            kind: ToolKind::default(),
+            name: self.name.clone(),
+            description: String::new(),
+            kind: ToolKind::Other,
             input_schema: serde_json::json!({ "type": "object" }),
         }
     }
-    async fn call(&self, _args: serde_json::Value) -> Result<ToolCallContent> {
-        *self.calls.lock().unwrap() += 1;
-        Ok(ToolCallContent::from(ContentBlock::Text(TextContent::new(
-            "echoed".to_string(),
+    fn tier(&self) -> Tier {
+        self.tier
+    }
+    async fn call(&self, _cx: &ToolContext, args: serde_json::Value) -> Result<ToolCallContent> {
+        self.log.lock().unwrap().push(self.name.clone());
+        Ok(ToolCallContent::Content(Content::new(ContentBlock::Text(
+            TextContent::new(args.to_string()),
         ))))
     }
 }
@@ -98,9 +107,22 @@ impl Tool for FailTool {
             input_schema: serde_json::json!({ "type": "object" }),
         }
     }
-    async fn call(&self, _args: serde_json::Value) -> Result<ToolCallContent> {
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    async fn call(&self, _cx: &ToolContext, _args: serde_json::Value) -> Result<ToolCallContent> {
         Err(manch_protocol::Error::Other("boom".to_string()))
     }
+}
+
+/// Wrap `s` as a standard-content [`ToolCallContent`] — the common case a
+/// provider's tool result decodes into. Unused until the provider tests land
+/// (Tasks 10-12).
+#[allow(dead_code)]
+pub fn text_content(s: &str) -> ToolCallContent {
+    ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+        s.to_string(),
+    ))))
 }
 
 /// A `MemoryStore` backed by an in-memory Vec of role-tagged blocks.

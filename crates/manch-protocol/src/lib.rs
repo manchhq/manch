@@ -41,20 +41,20 @@ use serde::{Deserialize, Serialize};
 /// does not define parallel content/event enums.
 pub mod acp {
     pub use agent_client_protocol::schema::v1::{
-        ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification,
+        Content, ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification,
         SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
         ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 }
 
-use acp::{ContentBlock, StopReason, ToolCall};
+use acp::{ContentBlock, StopReason};
 
 mod memory;
 mod permission;
 mod tool;
 
 pub use memory::{MemoryStore, Turn, coalesce_turns};
-pub use tool::{Extensions, Tool, ToolContext, ToolSchema};
+pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +104,13 @@ pub struct Usage {
 }
 
 /// A streamed unit of progress from an [`Agent`] during a turn.
+///
+/// `ToolInvocation` is intentionally small (id/name/args); `acp::SessionUpdate`
+/// is ACP's own, much larger type. Boxing `Update`'s payload to close that gap
+/// would ripple `Box`/deref through every call site across the workspace that
+/// matches on it — out of proportion to the lint. Sizes are known at each
+/// match, so the variance costs nothing but the enum's own stack slot.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     /// A streamed update in ACP's own vocabulary (content chunk, tool-call
@@ -111,7 +118,7 @@ pub enum AgentEvent {
     Update(acp::SessionUpdate),
     /// **BYOK path only.** The model has requested a host-registered tool; the
     /// runtime must dispatch it via [`Tool::call`] and re-prompt with the result.
-    ToolCall(ToolCall),
+    ToolCall(ToolInvocation),
     /// Provider-reported token counts. Emitted as they arrive, so a turn may
     /// produce several. Never trusted for billing — a managed tier meters at its
     /// own proxy rather than believing a client-side total.

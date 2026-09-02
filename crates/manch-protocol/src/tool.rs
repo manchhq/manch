@@ -16,6 +16,28 @@ pub struct ToolSchema {
     pub input_schema: serde_json::Value,
 }
 
+/// A model's request to run a host-registered [`Tool`], addressed by the
+/// tool's `schema().name` — never by a display field. This is Manch's one
+/// documented divergence from ACP (see the crate docs): ACP's `ToolCall` has
+/// no `name` because ACP agents dispatch their own tools and only ever needed
+/// a type for *reporting* a call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolInvocation {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Execution risk tier a [`Tool`] declares for itself. Governs auto-execution
+/// vs. requiring caller confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Read-only; safe to auto-execute.
+    Read,
+    /// Mutating; a caller may require confirmation before `call`.
+    Draft,
+}
+
 /// **Extension point 2.** What an agent can *do*. **This is where domain products
 /// plug in** (host-registered, BYOK path — see crate docs).
 #[async_trait]
@@ -23,8 +45,24 @@ pub trait Tool: Send + Sync {
     /// The schema advertised to the model.
     fn schema(&self) -> ToolSchema;
 
+    /// The execution risk tier this tool declares for itself. Required, with
+    /// no default: a default of [`Tier::Read`] would hand auto-execution to
+    /// any tool author who never considered the question.
+    fn tier(&self) -> Tier;
+
+    /// Preview what `call` would do, without doing it. Defaults to an empty
+    /// proposal — inert, unlike a default `tier()`, which would be a
+    /// permission grant.
+    async fn propose(
+        &self,
+        _cx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Vec<ToolCallContent>> {
+        Ok(vec![])
+    }
+
     /// Execute the tool with model-supplied JSON arguments.
-    async fn call(&self, args: serde_json::Value) -> Result<ToolCallContent>;
+    async fn call(&self, cx: &ToolContext, args: serde_json::Value) -> Result<ToolCallContent>;
 }
 
 /// Type-keyed storage for host-supplied context values passed to a tool at invocation.

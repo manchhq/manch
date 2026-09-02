@@ -47,7 +47,9 @@ impl ManchBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    use manch_protocol::Tier;
 
     use crate::Manch;
     use crate::testing::{EchoTool, ScriptAgent, VecStore};
@@ -65,7 +67,11 @@ mod tests {
     fn build_succeeds_and_registers_by_id() {
         let manch = Manch::builder()
             .agent(Arc::new(ScriptAgent::new("a", vec![])))
-            .tool(Arc::new(EchoTool::new("echo")))
+            .tool(Arc::new(EchoTool::new(
+                "echo",
+                Tier::Read,
+                Arc::new(Mutex::new(Vec::new())),
+            )))
             .memory(Arc::new(VecStore::new()))
             .build()
             .unwrap();
