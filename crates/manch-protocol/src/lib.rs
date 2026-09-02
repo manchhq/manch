@@ -108,6 +108,18 @@ pub fn coalesce_turns(items: impl IntoIterator<Item = (Role, ContentBlock)>) -> 
     turns
 }
 
+/// Token counts reported by a provider for a turn. Both fields are optional
+/// because the three provider dialects report them at different moments and not
+/// always together — Anthropic sends input at `message_start` and output at
+/// `message_delta`, Gemini repeats a running total per chunk, OpenAI sends one
+/// final block. Manch forwards what it is told and does not accumulate; a
+/// consumer that needs a running total sums the events it receives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+}
+
 /// A streamed unit of progress from an [`Agent`] during a turn.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -117,6 +129,10 @@ pub enum AgentEvent {
     /// **BYOK path only.** The model has requested a host-registered tool; the
     /// runtime must dispatch it via [`Tool::call`] and re-prompt with the result.
     ToolCall(ToolCall),
+    /// Provider-reported token counts. Emitted as they arrive, so a turn may
+    /// produce several. Never trusted for billing — a managed tier meters at its
+    /// own proxy rather than believing a client-side total.
+    Usage(Usage),
     /// The turn finished.
     Done(StopReason),
 }

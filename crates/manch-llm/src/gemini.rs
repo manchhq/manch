@@ -6,14 +6,15 @@ use async_trait::async_trait;
 use manch_protocol::acp::StopReason;
 use manch_protocol::{Agent, Context, EventSink, Result, Role, ToolSchema, Turn};
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, turn_text};
+use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
-const BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub(crate) const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub(crate) const FALLBACK_MODEL: &str = "gemini-3-flash";
 
 pub struct GeminiAgent {
     api_key: String,
     model: String,
+    base: String,
 }
 
 impl GeminiAgent {
@@ -21,8 +22,27 @@ impl GeminiAgent {
         Self {
             api_key,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
+            base: crate::resolve_base("gemini", None, DEFAULT_BASE),
         }
     }
+
+    /// Point this agent at an alternative endpoint. Wins over `MANCH_GEMINI_BASE_URL`.
+    #[must_use]
+    pub fn base_url(mut self, base: impl Into<String>) -> Self {
+        let base = base.into();
+        self.base = crate::pick_base(Some(&base), None, &self.base);
+        self
+    }
+}
+
+/// `{base}/models/{model}:streamGenerateContent?alt=sse`. Pure.
+pub(crate) fn stream_url(base: &str, model: &str) -> String {
+    format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+}
+
+/// `{base}/models`. Pure.
+pub(crate) fn models_url(base: &str) -> String {
+    format!("{base}/models")
 }
 
 /// Pure request body: role-tagged turns as Gemini `contents`.
@@ -41,27 +61,42 @@ pub(crate) fn request_body(turns: &[Turn]) -> serde_json::Value {
 }
 
 /// Parse one SSE line: concatenate the candidate's text parts, or surface an error. Pure.
-pub(crate) fn parse_line(data: &str) -> Option<SseItem> {
-    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
     if let Some(msg) = v
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(|m| m.as_str())
     {
-        return Some(SseItem::Error(format!("gemini: {msg}")));
+        return vec![SseItem::Error(format!("gemini: {msg}"))];
     }
-    let parts = v
-        .get("candidates")?
-        .as_array()?
-        .first()?
-        .get("content")?
-        .get("parts")?
-        .as_array()?;
-    let text: String = parts
-        .iter()
-        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-        .collect();
-    (!text.is_empty()).then_some(SseItem::Text(text))
+    let mut out = Vec::new();
+    let text: String = v
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !text.is_empty() {
+        out.push(SseItem::Text(text));
+    }
+    if let Some(u) = v.get("usageMetadata") {
+        out.push(SseItem::Usage(manch_protocol::Usage {
+            input_tokens: token_count(u, "promptTokenCount"),
+            output_tokens: token_count(u, "candidatesTokenCount"),
+        }));
+    }
+    out
 }
 
 /// Parse list-models response; ids drop the `models/` prefix. Only models that
@@ -102,10 +137,16 @@ fn supports_streaming(model: &serde_json::Value) -> bool {
 }
 
 pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
+    list_models_at(api_key, None).await
+}
+
+/// As [`list_models`], against an explicit base (falling back to the env
+/// override, then the vendor default).
+pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
     ensure_crypto_provider();
-    let url = format!("{BASE}/models");
+    let base = crate::resolve_base("gemini", base, DEFAULT_BASE);
     let resp = reqwest::Client::new()
-        .get(url)
+        .get(models_url(&base))
         .header("x-goog-api-key", api_key)
         .send()
         .await;
@@ -125,9 +166,8 @@ impl Agent for GeminiAgent {
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
         ensure_crypto_provider();
-        let url = format!("{BASE}/models/{}:streamGenerateContent?alt=sse", self.model);
         let resp = reqwest::Client::new()
-            .post(url)
+            .post(stream_url(&self.base, &self.model))
             .header("x-goog-api-key", &self.api_key)
             .json(&request_body(&ctx.turns))
             .send()
@@ -177,13 +217,46 @@ mod tests {
     #[test]
     fn parse_line_extracts_candidate_text() {
         let d = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]}}]}"#;
-        assert!(matches!(parse_line(d), Some(crate::SseItem::Text(t)) if t == "Hi"));
+        assert!(matches!(parse_line(d).as_slice(), [crate::SseItem::Text(t)] if t == "Hi"));
+    }
+
+    #[test]
+    fn parse_line_reports_usage_alongside_text_in_one_chunk() {
+        // Gemini repeats usageMetadata on chunks that also carry text, so one
+        // frame must be able to yield two items.
+        let d = r#"{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7}}"#;
+        let items = parse_line(d);
+        assert!(matches!(items.as_slice(),
+            [crate::SseItem::Text(t), crate::SseItem::Usage(u)]
+                if t == "Hi" && u.input_tokens == Some(5) && u.output_tokens == Some(7)));
+    }
+
+    #[test]
+    fn new_defaults_to_the_vendor_base() {
+        assert_eq!(GeminiAgent::new("k".into(), None).base, DEFAULT_BASE);
+    }
+
+    #[test]
+    fn base_url_overrides_the_default() {
+        let g = GeminiAgent::new("k".into(), None).base_url("https://proxy.internal/v1beta");
+        assert_eq!(g.base, "https://proxy.internal/v1beta");
+    }
+
+    #[test]
+    fn urls_derive_from_the_base() {
+        assert_eq!(
+            stream_url("https://p/v1beta", "gemini-3-flash"),
+            "https://p/v1beta/models/gemini-3-flash:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(models_url("https://p/v1beta"), "https://p/v1beta/models");
     }
 
     #[test]
     fn parse_line_surfaces_error() {
         let d = r#"{"error":{"code":400,"message":"bad key"}}"#;
-        assert!(matches!(parse_line(d), Some(crate::SseItem::Error(e)) if e == "gemini: bad key"));
+        assert!(
+            matches!(parse_line(d).as_slice(), [crate::SseItem::Error(e)] if e == "gemini: bad key")
+        );
     }
 
     #[test]

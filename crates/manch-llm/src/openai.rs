@@ -6,10 +6,9 @@ use async_trait::async_trait;
 use manch_protocol::acp::StopReason;
 use manch_protocol::{Agent, Context, EventSink, Result, Role, ToolSchema, Turn};
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, turn_text};
+use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
-const URL: &str = "https://api.openai.com/v1/chat/completions";
-const MODELS_URL: &str = "https://api.openai.com/v1/models";
+pub(crate) const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 // Stable chat alias — resolves to the current GPT-5 chat snapshot and works with
 // Chat Completions, so it won't rot like a pinned id. Only hit if list-models fails.
 pub(crate) const FALLBACK_MODEL: &str = "gpt-5-chat-latest";
@@ -17,6 +16,7 @@ pub(crate) const FALLBACK_MODEL: &str = "gpt-5-chat-latest";
 pub struct OpenAiAgent {
     api_key: String,
     model: String,
+    base: String,
 }
 
 impl OpenAiAgent {
@@ -24,8 +24,28 @@ impl OpenAiAgent {
         Self {
             api_key,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
+            base: crate::resolve_base("openai", None, DEFAULT_BASE),
         }
     }
+
+    /// Point this agent at an OpenAI-compatible endpoint — a managed-tier proxy,
+    /// or a third party such as Fireworks. Wins over `MANCH_OPENAI_BASE_URL`.
+    #[must_use]
+    pub fn base_url(mut self, base: impl Into<String>) -> Self {
+        let base = base.into();
+        self.base = crate::pick_base(Some(&base), None, &self.base);
+        self
+    }
+}
+
+/// `{base}/chat/completions`. Pure.
+pub(crate) fn completions_url(base: &str) -> String {
+    format!("{base}/chat/completions")
+}
+
+/// `{base}/models`. Pure.
+pub(crate) fn models_url(base: &str) -> String {
+    format!("{base}/models")
 }
 
 pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
@@ -42,31 +62,47 @@ pub(crate) fn request_body(model: &str, turns: &[Turn]) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "stream": true,
+        // Chat Completions reports no usage at all in stream mode unless this
+        // is set; without it AgentEvent::Usage would never fire for OpenAI.
+        "stream_options": { "include_usage": true },
         "messages": messages,
     })
 }
 
 /// Parse one SSE line. `[DONE]` is the stream terminator (not JSON) → None. Pure.
-pub(crate) fn parse_line(data: &str) -> Option<SseItem> {
+pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     if data == "[DONE]" {
-        return None;
+        return Vec::new();
     }
-    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
     if let Some(msg) = v
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(|m| m.as_str())
     {
-        return Some(SseItem::Error(format!("openai: {msg}")));
+        return vec![SseItem::Error(format!("openai: {msg}"))];
+    }
+    let mut out = Vec::new();
+    if let Some(u) = v.get("usage") {
+        out.push(SseItem::Usage(manch_protocol::Usage {
+            input_tokens: token_count(u, "prompt_tokens"),
+            output_tokens: token_count(u, "completion_tokens"),
+        }));
     }
     let content = v
-        .get("choices")?
-        .as_array()?
-        .first()?
-        .get("delta")?
-        .get("content")?
-        .as_str()?;
-    (!content.is_empty()).then_some(SseItem::Text(content.to_string()))
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or_default();
+    if !content.is_empty() {
+        out.push(SseItem::Text(content.to_string()));
+    }
+    out
 }
 
 pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
@@ -115,9 +151,16 @@ fn is_chat_model(id: &str) -> bool {
 }
 
 pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
+    list_models_at(api_key, None).await
+}
+
+/// As [`list_models`], against an explicit base (falling back to the env
+/// override, then the vendor default).
+pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
     ensure_crypto_provider();
+    let base = crate::resolve_base("openai", base, DEFAULT_BASE);
     let resp = reqwest::Client::new()
-        .get(MODELS_URL)
+        .get(models_url(&base))
         .bearer_auth(api_key)
         .send()
         .await;
@@ -138,7 +181,7 @@ impl Agent for OpenAiAgent {
     ) -> Result<StopReason> {
         ensure_crypto_provider();
         let resp = reqwest::Client::new()
-            .post(URL)
+            .post(completions_url(&self.base))
             .bearer_auth(&self.api_key)
             .json(&request_body(&self.model, &ctx.turns))
             .send()
@@ -192,12 +235,53 @@ mod tests {
     #[test]
     fn parse_line_extracts_delta_content() {
         let d = r#"{"choices":[{"delta":{"content":"Hi"}}]}"#;
-        assert!(matches!(parse_line(d), Some(crate::SseItem::Text(t)) if t == "Hi"));
+        assert!(matches!(parse_line(d).as_slice(), [crate::SseItem::Text(t)] if t == "Hi"));
+    }
+
+    #[test]
+    fn parse_line_reports_usage_from_the_final_chunk() {
+        let d = r#"{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4}}"#;
+        assert!(matches!(
+            parse_line(d).as_slice(),
+            [crate::SseItem::Usage(u)] if u.input_tokens == Some(9) && u.output_tokens == Some(4)
+        ));
+    }
+
+    #[test]
+    fn request_body_opts_into_streamed_usage() {
+        // Chat Completions reports no usage in stream mode unless asked.
+        let body = request_body("gpt-5-chat-latest", &[u("hi")]);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn new_defaults_to_the_vendor_base() {
+        assert_eq!(OpenAiAgent::new("k".into(), None).base, DEFAULT_BASE);
+    }
+
+    #[test]
+    fn base_url_overrides_the_default() {
+        let a =
+            OpenAiAgent::new("k".into(), None).base_url("https://api.fireworks.ai/inference/v1");
+        assert_eq!(a.base, "https://api.fireworks.ai/inference/v1");
+    }
+
+    #[test]
+    fn urls_derive_from_the_base() {
+        let b = "https://api.fireworks.ai/inference/v1";
+        assert_eq!(
+            completions_url(b),
+            "https://api.fireworks.ai/inference/v1/chat/completions"
+        );
+        assert_eq!(
+            models_url(b),
+            "https://api.fireworks.ai/inference/v1/models"
+        );
     }
 
     #[test]
     fn parse_line_ignores_done_sentinel() {
-        assert!(parse_line("[DONE]").is_none());
+        assert!(parse_line("[DONE]").is_empty());
     }
 
     #[test]

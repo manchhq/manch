@@ -193,6 +193,32 @@ So ~three hand-rolled clients plus one OpenAI-compatible config layer cover the
 entire list. Per-provider quirks (max-tokens field name, base URL, schema
 sanitisation) are **data**, not branches.
 
+**Pointing a client elsewhere.** Every BYOK agent resolves its endpoint as
+*explicit argument → `MANCH_{PROVIDER}_BASE_URL` → vendor default*, and the
+catalog endpoint follows the same base as the completion endpoint (so an
+overridden client never lists the vendor's model list by mistake):
+
+```rust
+// an OpenAI-compatible third party, or a self-hosted gateway
+OpenAiAgent::new(key, None).base_url("https://api.fireworks.ai/inference/v1");
+```
+
+```sh
+# same effect for every OpenAI-dialect agent in the process
+export MANCH_OPENAI_BASE_URL=https://api.fireworks.ai/inference/v1
+```
+
+The explicit argument wins deliberately: a server routing several tenants
+through different proxies needs per-agent endpoints in one process, which an
+environment variable alone cannot express.
+
+**Token usage.** Providers report token counts differently — Anthropic splits
+input and output across two frames, Gemini repeats a running total per chunk,
+OpenAI sends one final block (and only when asked). Manch normalises them to
+`AgentEvent::Usage` and forwards them as they arrive without accumulating. This
+is for display, never for billing: a managed tier meters at its own proxy rather
+than trusting a client-side total.
+
 **Provider roadmap:** Anthropic → OpenAI → OpenAI-compatible (lights up
 xAI / Groq / Together / Fireworks / vLLM / LiteLLM at once) → Gemini, Ollama →
 Bedrock / Vertex on demand.

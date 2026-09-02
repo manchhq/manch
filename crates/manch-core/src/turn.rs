@@ -47,6 +47,10 @@ impl EventSink for InterceptSink {
                 Ok(())
             }
             AgentEvent::Done(_) => Ok(()),
+            // Token counts are UI output, not a host-side control event — forward
+            // them so a consumer can show spend. Never a billing source: a
+            // managed tier meters at its own proxy.
+            AgentEvent::Usage(u) => self.inner.emit(AgentEvent::Usage(u)).await,
             // Explicit (not a catch-all) so that if `AgentEvent` grows a new
             // variant, this match fails to compile instead of silently
             // forwarding an unrecognized event to the caller as UI output.
@@ -71,10 +75,27 @@ mod tests {
 
     use manch_protocol::PromptHandler;
     use manch_protocol::acp::{ContentBlock, StopReason, TextContent, ToolCall};
-    use manch_protocol::{AgentEvent, Error, MemoryStore, Role};
+    use manch_protocol::{AgentEvent, Error, EventSink, MemoryStore, Role, Usage};
 
     use crate::Manch;
     use crate::testing::{CollectSink, ScriptAgent, VecStore};
+
+    #[tokio::test]
+    async fn intercept_sink_forwards_usage_to_the_caller() {
+        // Token counts are UI output (a spend display), not a host-side control
+        // event like a tool call, so they must reach the caller's sink.
+        let inner = Arc::new(CollectSink::new());
+        let sink = super::InterceptSink::new(inner.clone());
+        let usage = Usage {
+            input_tokens: Some(12),
+            output_tokens: Some(4),
+        };
+        sink.emit(AgentEvent::Usage(usage)).await.unwrap();
+        assert!(matches!(
+            inner.events().as_slice(),
+            [AgentEvent::Usage(got)] if *got == usage
+        ));
+    }
 
     fn user_msg(text: &str) -> Vec<ContentBlock> {
         vec![ContentBlock::Text(TextContent::new(text.to_string()))]
