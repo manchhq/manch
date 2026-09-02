@@ -54,7 +54,7 @@ mod permission;
 mod tool;
 
 pub use memory::{MemoryStore, Turn, coalesce_turns};
-pub use tool::{Tool, ToolSchema};
+pub use tool::{Extensions, Tool, ToolContext, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
 #[derive(Debug, thiserror::Error)]
