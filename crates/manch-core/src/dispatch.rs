@@ -28,7 +28,12 @@ use crate::Manch;
 /// (flush — the calls that already ran have final results), or a call errors
 /// (drop, so a mid-batch failure leaves no partial record).
 #[derive(Default)]
-pub(crate) struct Buffer(Vec<(Role, Entry)>);
+/// Buffers one batch's calls and results separately, so a flush writes every
+/// call before any result.
+pub(crate) struct Buffer {
+    calls: Vec<Entry>,
+    results: Vec<Entry>,
+}
 
 impl Buffer {
     pub(crate) fn new() -> Self {
@@ -37,26 +42,36 @@ impl Buffer {
 
     /// Record a dispatched call and the content it produced.
     ///
-    /// The `ToolCall` is pushed before its `ToolResult` and the two are never
-    /// separated: Anthropic rejects a `tool_result` with no preceding
-    /// `tool_use`, so stored history would be invalid input for the next loop
-    /// iteration if they were written the other way round.
+    /// Calls and results are kept in separate lists and written calls-first on
+    /// [`Buffer::flush`], for two reasons that both matter.
+    ///
+    /// Every call precedes every result, because Anthropic rejects a
+    /// `tool_result` with no preceding `tool_use` — stored history would be
+    /// invalid input for the next loop iteration otherwise.
+    ///
+    /// And the calls of one batch stay *adjacent*, so `coalesce_turns` folds
+    /// them into a single assistant turn with their results in a single user
+    /// turn. Interleaving them per invocation produced four alternating turns
+    /// for a two-call batch, which misrepresents a parallel batch as a sequence
+    /// — and Gemini rejects it outright, because it attaches a thought
+    /// signature to only the *first* call of a batch, so a lone second call in
+    /// a turn of its own has none.
     pub(crate) fn record(&mut self, inv: &ToolInvocation, content: Vec<acp::ToolCallContent>) {
-        self.0.push((Role::Assistant, Entry::ToolCall(inv.clone())));
-        self.0.push((
-            Role::User,
-            Entry::ToolResult {
-                id: inv.id.clone(),
-                content,
-            },
-        ));
+        self.calls.push(Entry::ToolCall(inv.clone()));
+        self.results.push(Entry::ToolResult {
+            id: inv.id.clone(),
+            content,
+        });
     }
 
     /// Append everything buffered, in order. Consumes the buffer, so it cannot
     /// be flushed twice.
     pub(crate) async fn flush(self, memory: &dyn MemoryStore, session_id: &str) -> Result<()> {
-        for (role, entry) in self.0 {
-            memory.append(session_id, role, entry).await?;
+        for entry in self.calls {
+            memory.append(session_id, Role::Assistant, entry).await?;
+        }
+        for entry in self.results {
+            memory.append(session_id, Role::User, entry).await?;
         }
         Ok(())
     }
@@ -779,6 +794,93 @@ mod tests {
                 acp::ToolCallStatus::InProgress,
                 acp::ToolCallStatus::Completed
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parallel_batch_is_persisted_as_one_call_turn_then_one_result_turn() {
+        // Two calls in one model turn must stay in one model turn. Interleaving
+        // them as call/result/call/result coalesces into FOUR alternating turns,
+        // which misrepresents what the model did — and Gemini rejects it
+        // outright, because it attaches a thought signature to only the first
+        // call of a batch, leaving a lone second call unsigned in a turn of its
+        // own.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(MemStore::new());
+        let m = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new(
+                "a",
+                vec![
+                    vec![
+                        tool_call("c1", "whoami", json!({})),
+                        tool_call("c2", "bed_count", json!({})),
+                    ],
+                    vec![AgentEvent::text_chunk("kaayantar, 23 beds")],
+                ],
+            )))
+            .tool(Arc::new(EchoTool::new("whoami", Tier::Read, log.clone())))
+            .tool(Arc::new(EchoTool::new(
+                "bed_count",
+                Tier::Read,
+                log.clone(),
+            )))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+
+        m.handle(
+            "a",
+            "s",
+            user_msg("which clinic and how many beds?"),
+            ext(),
+            sink(),
+        )
+        .await
+        .unwrap();
+
+        let shape: Vec<(manch_protocol::Role, &'static str)> = store
+            .entries()
+            .into_iter()
+            .map(|(role, e)| {
+                (
+                    role,
+                    match e {
+                        Entry::Block(_) => "block",
+                        Entry::ToolCall(_) => "call",
+                        Entry::ToolResult { .. } => "result",
+                    },
+                )
+            })
+            .collect();
+
+        let calls: Vec<usize> = shape
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, k))| *k == "call")
+            .map(|(i, _)| i)
+            .collect();
+        let results: Vec<usize> = shape
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, k))| *k == "result")
+            .map(|(i, _)| i)
+            .collect();
+
+        assert_eq!(calls.len(), 2, "both calls must be persisted: {shape:?}");
+        assert_eq!(
+            results.len(),
+            2,
+            "both results must be persisted: {shape:?}"
+        );
+        assert_eq!(
+            calls[1],
+            calls[0] + 1,
+            "the two calls must be adjacent so they coalesce into ONE turn: {shape:?}"
+        );
+        assert!(
+            calls[1] < results[0],
+            "every call must precede every result, or the batch splits into \
+             alternating turns: {shape:?}"
         );
     }
 
