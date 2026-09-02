@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use manch_protocol::{Agent, Channel, Error, MemoryStore, Result, Tool};
+use manch_protocol::{
+    Agent, AskOncePolicy, Channel, Error, MemoryStore, PermissionPolicy, Result, Tool,
+};
 
 use crate::Manch;
 
@@ -13,6 +15,7 @@ pub struct ManchBuilder {
     tools: HashMap<String, Arc<dyn Tool>>,
     channels: HashMap<String, Arc<dyn Channel>>,
     memory: Option<Arc<dyn MemoryStore>>,
+    policy: Option<Arc<dyn PermissionPolicy>>,
 }
 
 impl ManchBuilder {
@@ -32,6 +35,15 @@ impl ManchBuilder {
         self.memory = Some(memory);
         self
     }
+    /// Sets the [`PermissionPolicy`] deciding whether (and how) a human is
+    /// asked before a `Draft`-tier tool executes. Defaults to
+    /// [`AskOncePolicy`] — Manch does not decide permission posture for
+    /// consumers it has not met, so the shipped default always asks rather
+    /// than silently allowing.
+    pub fn permission_policy(mut self, policy: Arc<dyn PermissionPolicy>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
     pub fn build(self) -> Result<Manch> {
         let memory = self
             .memory
@@ -41,6 +53,7 @@ impl ManchBuilder {
             tools: Arc::new(self.tools),
             channels: Arc::new(self.channels),
             memory,
+            policy: self.policy.unwrap_or_else(|| Arc::new(AskOncePolicy)),
         })
     }
 }

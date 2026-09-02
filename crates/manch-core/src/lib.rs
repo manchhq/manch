@@ -21,8 +21,8 @@ use async_trait::async_trait;
 pub use builder::ManchBuilder;
 use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
 use manch_protocol::{
-    Agent, AgentEvent, Channel, Entry, Error, EventSink, Extensions, MemoryStore, PromptHandler,
-    Result, Role, Tool, ToolContext, ToolSchema,
+    Agent, AgentEvent, Channel, Entry, Error, EventSink, Extensions, MemoryStore, PermissionPolicy,
+    PromptHandler, Result, Role, Tool, ToolContext, ToolSchema,
 };
 use turn::InterceptSink;
 
@@ -38,6 +38,14 @@ pub struct Manch {
     pub(crate) tools: Arc<HashMap<String, Arc<dyn Tool>>>,
     pub(crate) channels: Arc<HashMap<String, Arc<dyn Channel>>>,
     pub(crate) memory: Arc<dyn MemoryStore>,
+    /// Decides whether (and how) a human is asked before a `Draft`-tier tool
+    /// executes. Manch ships a seam ([`PermissionPolicy`]) and a safe default
+    /// (always ask), not a permission policy of its own.
+    ///
+    /// Unread until `handle` consults it before dispatching `Draft`-tier
+    /// tools (Task 7).
+    #[allow(dead_code)]
+    pub(crate) policy: Arc<dyn PermissionPolicy>,
 }
 
 impl std::fmt::Debug for Manch {

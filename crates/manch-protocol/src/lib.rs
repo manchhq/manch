@@ -41,9 +41,11 @@ use serde::{Deserialize, Serialize};
 /// does not define parallel content/event enums.
 pub mod acp {
     pub use agent_client_protocol::schema::v1::{
-        Content, ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification,
-        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        Content, ContentBlock, ContentChunk, PermissionOption, PermissionOptionId,
+        PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
+        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 }
 
@@ -54,6 +56,7 @@ mod permission;
 mod tool;
 
 pub use memory::{Entry, MemoryStore, Turn, coalesce_turns};
+pub use permission::{AskOncePolicy, PermissionDecision, PermissionPolicy, kind_of, once_options};
 pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
