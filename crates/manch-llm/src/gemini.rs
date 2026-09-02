@@ -445,6 +445,71 @@ mod tests {
     }
 
     #[test]
+    fn request_body_keeps_two_calls_to_one_tool_in_issue_order() {
+        // Gemini's functionResponse carries only a name, no id, so two calls to
+        // the same tool in one turn are indistinguishable on the wire. Issue
+        // order is the only alignment left: response N must line up with call N.
+        let turns = vec![
+            Turn {
+                role: Role::Assistant,
+                entries: vec![
+                    Entry::ToolCall(ToolInvocation {
+                        id: "c1".into(),
+                        name: "search".into(),
+                        arguments: serde_json::json!({"q":"asha"}),
+                    }),
+                    Entry::ToolCall(ToolInvocation {
+                        id: "c2".into(),
+                        name: "search".into(),
+                        arguments: serde_json::json!({"q":"bhim"}),
+                    }),
+                ],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![
+                    Entry::ToolResult {
+                        id: "c1".into(),
+                        content: vec![crate::text_content("2 matches")],
+                    },
+                    Entry::ToolResult {
+                        id: "c2".into(),
+                        content: vec![crate::text_content("5 matches")],
+                    },
+                ],
+            },
+        ];
+        let body = request_body(&turns, &[]);
+        let calls = body["contents"][0]["parts"]
+            .as_array()
+            .expect("call parts")
+            .clone();
+        assert_eq!(calls.len(), 2, "one part per call: {calls:#?}");
+        assert_eq!(calls[0]["functionCall"]["args"]["q"], "asha");
+        assert_eq!(calls[1]["functionCall"]["args"]["q"], "bhim");
+
+        let responses = body["contents"][1]["parts"]
+            .as_array()
+            .expect("response parts")
+            .clone();
+        assert_eq!(
+            responses.len(),
+            2,
+            "both responses must be emitted, not merged: {responses:#?}"
+        );
+        assert_eq!(responses[0]["functionResponse"]["name"], "search");
+        assert_eq!(responses[1]["functionResponse"]["name"], "search");
+        assert_eq!(
+            responses[0]["functionResponse"]["response"]["result"], "2 matches",
+            "response N must line up with call N"
+        );
+        assert_eq!(
+            responses[1]["functionResponse"]["response"]["result"], "5 matches",
+            "response N must line up with call N"
+        );
+    }
+
+    #[test]
     fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
         let body = request_body(&[u("hi")], &[]);
         assert!(

@@ -196,7 +196,11 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
         return vec![SseItem::Error(format!("openai: {msg}"))];
     }
     let mut out = Vec::new();
-    if let Some(u) = v.get("usage") {
+    // `stream_options.include_usage` makes OpenAI send `"usage": null` on every
+    // non-final chunk, so `get("usage")` is Some(Null) there — filter it out or
+    // an empty Usage event fires per frame. Anthropic guards by frame type and
+    // Gemini by key presence; only this parser sees a present-but-null key.
+    if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
         out.push(SseItem::Usage(manch_protocol::Usage {
             input_tokens: token_count(u, "prompt_tokens"),
             output_tokens: token_count(u, "completion_tokens"),
@@ -402,6 +406,20 @@ mod tests {
             parse_line(d).as_slice(),
             [crate::SseItem::Usage(u)] if u.input_tokens == Some(9) && u.output_tokens == Some(4)
         ));
+    }
+
+    #[test]
+    fn parse_line_ignores_a_null_usage_field() {
+        // With stream_options.include_usage, OpenAI sends "usage": null on
+        // every non-final chunk. `v.get("usage")` is Some(Null) there, so an
+        // unguarded read fires an empty Usage event per frame.
+        let d = r#"{"choices":[{"delta":{"content":"Hi"}}],"usage":null}"#;
+        assert!(
+            !parse_line(d)
+                .iter()
+                .any(|i| matches!(i, crate::SseItem::Usage(_))),
+            "a null usage field is not a usage report"
+        );
     }
 
     #[test]
