@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::ToolCallStatus;
 use async_trait::async_trait;
-use manch_protocol::acp::{SessionUpdate, StopReason};
-use manch_protocol::{Agent, AgentEvent, Context, EventSink, Result, Role, ToolSchema};
+use manch_protocol::acp::{self, SessionUpdate, StopReason};
+use manch_protocol::{
+    Agent, AgentEvent, AskOncePolicy, Context, EventSink, Extensions, PermissionDecision,
+    PermissionPolicy, Result, Role, ToolContext, ToolInvocation, ToolSchema, kind_of,
+};
 
 const CLAUDE_CODE_PKG: &str = "@agentclientprotocol/claude-agent-acp@latest";
 const CODEX_PKG: &str = "@zed-industries/codex-acp";
@@ -24,11 +27,26 @@ pub struct AcpCliAgent {
     id: &'static str,
     api_key: Option<String>,
     pub spec: LaunchSpec,
+    policy: Arc<dyn PermissionPolicy>,
 }
 
 impl AcpCliAgent {
+    /// Defaults to [`AskOncePolicy`] — deny-by-default until a consumer opts
+    /// into its own [`PermissionPolicy`] via [`Self::with_policy`].
     pub fn new(id: &'static str, api_key: Option<String>, spec: LaunchSpec) -> Self {
-        Self { id, api_key, spec }
+        Self {
+            id,
+            api_key,
+            spec,
+            policy: Arc::new(AskOncePolicy),
+        }
+    }
+
+    /// Overrides the default [`AskOncePolicy`] with a consumer-supplied
+    /// [`PermissionPolicy`] (e.g. one backed by a remembered-decision store).
+    pub fn with_policy(mut self, policy: Arc<dyn PermissionPolicy>) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Full argv passed to the ACP host: a leading `NAME=value` env token (only
@@ -112,6 +130,60 @@ pub fn tool_status(status: ToolCallStatus) -> &'static str {
     }
 }
 
+/// Decides the outcome of an incoming `session/request_permission` from an
+/// external ACP agent, via `policy`.
+///
+/// The ACP path has no `ToolInvocation` of its own: Manch is the ACP
+/// *client* here, and the external agent owns and dispatches its own tools
+/// — nothing on this path ever looks a tool up by name. So this synthesises
+/// a `ToolInvocation` purely so `policy` has something to inspect: `id` is
+/// the agent's `tool_call_id`, and `name` is the agent's own display title
+/// for the call (`tool_call.fields.title`). That title is an arbitrary
+/// string the *agent* chose to show a human, not a registry key — do not
+/// mistake it for a dispatch name.
+///
+/// Deny-by-default: `Resolved(outcome)` is returned as-is, but `Ask(options)`
+/// means "a human should decide", and there is no human on this code path
+/// inside the library, so the first reject-kind option is selected — never
+/// an allow — falling back to `Cancelled` if the agent offered no
+/// reject-kind option at all.
+pub(crate) async fn decide_permission(
+    policy: Arc<dyn PermissionPolicy>,
+    req: acp::RequestPermissionRequest,
+) -> Result<acp::RequestPermissionOutcome> {
+    let session_id = req.session_id.0.to_string();
+    let tool_call_id = req.tool_call.tool_call_id.0.to_string();
+    let cx = ToolContext::new(
+        session_id,
+        tool_call_id.clone(),
+        Arc::new(Extensions::default()),
+    );
+    let inv = ToolInvocation {
+        id: tool_call_id,
+        name: req.tool_call.fields.title.clone().unwrap_or_default(),
+        arguments: serde_json::Value::Null,
+    };
+
+    match policy.decide(&cx, &inv).await? {
+        PermissionDecision::Resolved(outcome) => Ok(outcome),
+        PermissionDecision::Ask(options) => Ok(options
+            .into_iter()
+            .find(|opt| {
+                matches!(
+                    kind_of(&opt.option_id),
+                    Some(acp::PermissionOptionKind::RejectOnce)
+                        | Some(acp::PermissionOptionKind::RejectAlways)
+                )
+            })
+            .map(|opt| {
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    opt.option_id,
+                ))
+            })
+            .unwrap_or(acp::RequestPermissionOutcome::Cancelled)),
+    }
+}
+
 #[async_trait]
 impl Agent for AcpCliAgent {
     fn id(&self) -> &str {
@@ -130,7 +202,7 @@ impl Agent for AcpCliAgent {
         use agent_client_protocol::schema::v1::{
             ContentBlock, ContentChunk, InitializeRequest, NewSessionRequest, PromptRequest,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-            SelectedPermissionOutcome, SessionNotification,
+            SessionNotification,
         };
         use agent_client_protocol::{self as acp, AcpAgent, Client, ConnectionTo};
 
@@ -161,6 +233,7 @@ impl Agent for AcpCliAgent {
             })
             .unwrap_or_default();
         let id = self.id;
+        let policy = self.policy.clone();
 
         // The 'static notification handler owns a clone of the sink and emits
         // live as events arrive — no post-turn buffering, so partial text
@@ -222,17 +295,14 @@ impl Agent for AcpCliAgent {
                 acp::on_receive_notification!(),
             )
             .on_receive_request(
-                async move |request: RequestPermissionRequest, responder, _connection| match request
-                    .options
-                    .first()
-                    .map(|opt| opt.option_id.clone())
-                {
-                    Some(id) => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id)),
-                    )),
-                    None => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Cancelled,
-                    )),
+                async move |request: RequestPermissionRequest, responder, _connection| {
+                    // Deny-by-default: any failure to decide (including the
+                    // policy itself erroring) falls back to `Cancelled`,
+                    // never to an allow.
+                    let outcome = decide_permission(policy.clone(), request)
+                        .await
+                        .unwrap_or(RequestPermissionOutcome::Cancelled);
+                    responder.respond(RequestPermissionResponse::new(outcome))
                 },
                 acp::on_receive_request!(),
             )
@@ -273,6 +343,82 @@ fn err(e: impl ToString) -> manch_protocol::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records the `name` of every `ToolInvocation` it is asked to decide,
+    /// and always defers to a human (`Ask`) — never resolves on its own.
+    #[derive(Default)]
+    struct RecordingPolicy {
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl RecordingPolicy {
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PermissionPolicy for RecordingPolicy {
+        async fn decide(
+            &self,
+            _cx: &ToolContext,
+            inv: &ToolInvocation,
+        ) -> Result<PermissionDecision> {
+            self.seen.lock().unwrap().push(inv.name.clone());
+            Ok(PermissionDecision::Ask(manch_protocol::once_options()))
+        }
+    }
+
+    fn allow_always_option() -> acp::PermissionOption {
+        acp::PermissionOption::new(
+            acp::PermissionOptionId::new("allow_always"),
+            "Always allow",
+            acp::PermissionOptionKind::AllowAlways,
+        )
+    }
+
+    fn reject_once_option() -> acp::PermissionOption {
+        acp::PermissionOption::new(
+            acp::PermissionOptionId::new("reject_once"),
+            "Reject",
+            acp::PermissionOptionKind::RejectOnce,
+        )
+    }
+
+    fn request_with_options(opts: Vec<acp::PermissionOption>) -> acp::RequestPermissionRequest {
+        acp::RequestPermissionRequest::new(
+            acp::SessionId::new("s1"),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new("tc1"),
+                acp::ToolCallUpdateFields::new().title(Some("Edit file /etc/hosts".to_string())),
+            ),
+            opts,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_acp_handler_does_not_auto_approve_by_default() {
+        // A policy that records what it was asked, and refuses.
+        let policy = Arc::new(RecordingPolicy::default());
+        let decided = decide_permission(
+            policy.clone(),
+            request_with_options(vec![allow_always_option(), reject_once_option()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(policy.seen(), vec!["Edit file /etc/hosts".to_string()]);
+        match decided {
+            acp::RequestPermissionOutcome::Selected(s) => {
+                assert_eq!(s.option_id.0.as_ref(), "reject_once")
+            }
+            acp::RequestPermissionOutcome::Cancelled => {
+                panic!("expected a decision, not a cancellation")
+            }
+            _ => panic!("unexpected RequestPermissionOutcome variant"),
+        }
+        // The old behaviour would have selected options.first() — allow_always.
+    }
 
     #[test]
     fn claude_code_without_key_is_just_npx() {
