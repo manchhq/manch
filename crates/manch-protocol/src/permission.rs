@@ -103,6 +103,29 @@ impl PermissionPolicy for AskOncePolicy {
     }
 }
 
+/// **Extension point.** A blocking convenience for a consumer that can hold a
+/// call open across a human decision — a desktop or CLI app, not a stateless
+/// server.
+///
+/// Suspend/resume (`TurnOutcome::AwaitingApproval` / `Manch::approve`) stays
+/// the primitive: it is the more general of the two shapes, because a
+/// blocking approver is constructible from it (await a decision, then
+/// resume), while stateless suspension is *not* constructible from a
+/// blocking await — a suspended turn must be able to survive past the
+/// lifetime of any single call. `manch-core`'s `Manch::handle_with_approver`
+/// is a thin loop over `handle`/`approve` built on this trait; it is not a
+/// second control path, and it holds no state that `handle`/`approve` do
+/// not already hold.
+#[async_trait]
+pub trait Approver: Send + Sync {
+    /// Await a human's decision on `req` and return ACP's own outcome, in the
+    /// same `session/request_permission` vocabulary a UI would show.
+    async fn approve(
+        &self,
+        req: acp::RequestPermissionRequest,
+    ) -> Result<acp::RequestPermissionOutcome>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

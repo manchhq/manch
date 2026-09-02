@@ -56,7 +56,9 @@ mod permission;
 mod tool;
 
 pub use memory::{Entry, MemoryStore, Turn, coalesce_turns};
-pub use permission::{AskOncePolicy, PermissionDecision, PermissionPolicy, kind_of, once_options};
+pub use permission::{
+    Approver, AskOncePolicy, PermissionDecision, PermissionPolicy, kind_of, once_options,
+};
 pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
@@ -197,7 +199,9 @@ pub trait Channel: Send + Sync {
 /// Suspend/resume is the primitive because it is the more general of the two
 /// shapes: a blocking approver is constructible from it (await a decision, then
 /// resume), while stateless suspension is *not* constructible from a blocking
-/// await. `manch-core` ships a blocking convenience wrapper on top.
+/// await. `manch-core` ships a blocking convenience wrapper on top —
+/// `Manch::handle_with_approver`, a thin loop over `handle`/`approve` for a
+/// consumer (desktop, CLI) that can hold a call open across the decision.
 // `RequestPermissionRequest` embeds ACP's own `ToolCallUpdate`, so
 // `AwaitingApproval` is much larger than `Finished(StopReason)`. Boxing it
 // would push a `Box`/deref through every consumer that matches on the outcome —

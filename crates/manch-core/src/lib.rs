@@ -24,8 +24,9 @@ use dispatch::{Applied, Batch, Buffer};
 use manch_protocol::acp;
 use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
 use manch_protocol::{
-    Agent, AgentEvent, Channel, Entry, Error, EventSink, Extensions, MemoryStore, PermissionPolicy,
-    PromptHandler, Result, Role, Tool, ToolContext, ToolInvocation, ToolSchema, TurnOutcome,
+    Agent, AgentEvent, Approver, Channel, Entry, Error, EventSink, Extensions, MemoryStore,
+    PermissionPolicy, PromptHandler, Result, Role, Tool, ToolContext, ToolInvocation, ToolSchema,
+    TurnOutcome,
 };
 use turn::InterceptSink;
 
@@ -185,6 +186,59 @@ impl Manch {
         Err(Error::Other(format!(
             "tool-call loop exceeded {MAX_TOOL_ITERS} iterations"
         )))
+    }
+
+    /// Blocking convenience over [`Manch::handle`] / [`Manch::approve`] for a
+    /// consumer that can hold a call open across a human decision — a desktop
+    /// or CLI app, not a stateless server.
+    ///
+    /// This is a loop over the primitive, not a second control path: it holds
+    /// no state that `handle`/`approve` do not already hold, and on
+    /// suspension it passes back the exact `agent_id` and `pending` that
+    /// [`TurnOutcome::AwaitingApproval`] handed it — never a reconstructed,
+    /// cloned-and-rebuilt, or looked-up substitute — so the action that runs
+    /// is exactly the action the [`Approver`] was shown. A consumer that
+    /// needs to survive a process boundary (a stateless server that cannot
+    /// hold a request open across a human's decision) uses `handle` /
+    /// `approve` directly instead.
+    pub async fn handle_with_approver(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        message: Vec<ContentBlock>,
+        ext: Arc<Extensions>,
+        approver: &dyn Approver,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<StopReason> {
+        let mut outcome = self
+            .handle(agent_id, session_id, message, ext.clone(), sink.clone())
+            .await?;
+        loop {
+            match outcome {
+                TurnOutcome::Finished(stop) => return Ok(stop),
+                TurnOutcome::AwaitingApproval {
+                    agent_id,
+                    request,
+                    pending,
+                } => {
+                    let decision = approver.approve(request).await?;
+                    // `agent_id` and `pending` come back out of the outcome
+                    // itself, not from anything reconstructed or looked up:
+                    // the action that runs is exactly the action the
+                    // `Approver` was shown.
+                    outcome = self
+                        .approve(
+                            &agent_id,
+                            session_id,
+                            ext.clone(),
+                            pending,
+                            decision,
+                            sink.clone(),
+                        )
+                        .await?;
+                }
+            }
+        }
     }
 }
 

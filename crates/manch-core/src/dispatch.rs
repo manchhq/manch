@@ -298,9 +298,10 @@ impl Manch {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use manch_protocol::acp::{ContentBlock, TextContent};
+    use async_trait::async_trait;
+    use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
     use manch_protocol::{
-        AgentEvent, Entry, Extensions, MemoryStore, PermissionDecision, PermissionPolicy,
+        AgentEvent, Approver, Entry, Extensions, MemoryStore, PermissionDecision, PermissionPolicy,
         PromptHandler, Result, Tier, ToolContext, ToolInvocation, TurnOutcome, acp,
     };
     use serde_json::json;
@@ -694,5 +695,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("exceeded"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn handle_with_approver_drives_a_draft_call_to_completion() {
+        struct AlwaysAllow;
+        #[async_trait]
+        impl Approver for AlwaysAllow {
+            async fn approve(
+                &self,
+                _req: acp::RequestPermissionRequest,
+            ) -> Result<acp::RequestPermissionOutcome> {
+                Ok(acp::RequestPermissionOutcome::Selected(
+                    acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new("allow_once")),
+                ))
+            }
+        }
+        let (m, log, _store) = manch_with(
+            vec![tool_call("c1", "draft_prescription", json!({}))],
+            Tier::Draft,
+        );
+        let stop = m
+            .handle_with_approver("a", "s", user_msg("go"), ext(), &AlwaysAllow, sink())
+            .await
+            .unwrap();
+        assert_eq!(stop, StopReason::EndTurn);
+        assert!(
+            log.lock()
+                .unwrap()
+                .contains(&"draft_prescription".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_with_approver_stops_when_the_approver_cancels() {
+        struct Cancels;
+        #[async_trait]
+        impl Approver for Cancels {
+            async fn approve(
+                &self,
+                _req: acp::RequestPermissionRequest,
+            ) -> Result<acp::RequestPermissionOutcome> {
+                Ok(acp::RequestPermissionOutcome::Cancelled)
+            }
+        }
+        let (m, log, _store) = manch_with(
+            vec![tool_call("c1", "draft_prescription", json!({}))],
+            Tier::Draft,
+        );
+        let stop = m
+            .handle_with_approver("a", "s", user_msg("go"), ext(), &Cancels, sink())
+            .await
+            .unwrap();
+        assert_eq!(stop, StopReason::Cancelled);
+        assert!(log.lock().unwrap().is_empty());
     }
 }
