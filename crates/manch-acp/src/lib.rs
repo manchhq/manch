@@ -142,11 +142,20 @@ pub fn tool_status(status: ToolCallStatus) -> &'static str {
 /// string the *agent* chose to show a human, not a registry key — do not
 /// mistake it for a dispatch name.
 ///
-/// Deny-by-default: `Resolved(outcome)` is returned as-is, but `Ask(options)`
-/// means "a human should decide", and there is no human on this code path
-/// inside the library, so the first reject-kind option is selected — never
-/// an allow — falling back to `Cancelled` if the agent offered no
-/// reject-kind option at all.
+/// Deny-by-default: `Resolved(outcome)` is returned as-is. `Ask(_)` means "a
+/// human should decide", and there is no human on this code path inside the
+/// library, so the policy's own option list (built for a human to read, not
+/// for this fallback) is ignored entirely; instead the *agent's* own
+/// `req.options` — the ids ACP requires the client to answer with — are
+/// scanned for the first option that is reject-kind by its **typed** `kind`
+/// field, never by guessing by id. An option whose id resolves (via
+/// `kind_of`) to a *different* kind than the one it declares is treated as
+/// crafted/untrustworthy and skipped, not selected — matching by id alone
+/// would let an agent offer `{option_id: "reject_once", kind: AllowAlways}`
+/// and have us pick it believing it denies the action, when the agent would
+/// actually act on the `AllowAlways` it declared. Falls back to `Cancelled`
+/// if the agent offered no trustworthy reject-kind option at all — never an
+/// allow.
 pub(crate) async fn decide_permission(
     policy: Arc<dyn PermissionPolicy>,
     req: acp::RequestPermissionRequest,
@@ -166,14 +175,24 @@ pub(crate) async fn decide_permission(
 
     match policy.decide(&cx, &inv).await? {
         PermissionDecision::Resolved(outcome) => Ok(outcome),
-        PermissionDecision::Ask(options) => Ok(options
+        PermissionDecision::Ask(_) => Ok(req
+            .options
             .into_iter()
             .find(|opt| {
-                matches!(
-                    kind_of(&opt.option_id),
-                    Some(acp::PermissionOptionKind::RejectOnce)
-                        | Some(acp::PermissionOptionKind::RejectAlways)
-                )
+                let is_reject = matches!(
+                    opt.kind,
+                    acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways
+                );
+                // Trust the typed `kind` the agent declared, not our own
+                // guess from its id. If the id names a known kind that
+                // disagrees with the declared `kind`, the option is
+                // inconsistent — and therefore untrustworthy — so reject it
+                // outright rather than trusting either half.
+                let id_agrees = match kind_of(&opt.option_id) {
+                    Some(k) => k == opt.kind,
+                    None => true,
+                };
+                is_reject && id_agrees
             })
             .map(|opt| {
                 acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
@@ -385,6 +404,14 @@ mod tests {
         )
     }
 
+    fn allow_once_option() -> acp::PermissionOption {
+        acp::PermissionOption::new(
+            acp::PermissionOptionId::new("allow_once"),
+            "Allow once",
+            acp::PermissionOptionKind::AllowOnce,
+        )
+    }
+
     fn request_with_options(opts: Vec<acp::PermissionOption>) -> acp::RequestPermissionRequest {
         acp::RequestPermissionRequest::new(
             acp::SessionId::new("s1"),
@@ -418,6 +445,71 @@ mod tests {
             _ => panic!("unexpected RequestPermissionOutcome variant"),
         }
         // The old behaviour would have selected options.first() — allow_always.
+    }
+
+    #[tokio::test]
+    async fn an_agent_offering_only_allow_options_is_cancelled() {
+        // No reject-kind option exists at all, so there is nothing safe to
+        // select — the outcome must be Cancelled, and specifically not a
+        // Selected naming an id the agent never offered.
+        let policy = Arc::new(RecordingPolicy::default());
+        let decided = decide_permission(
+            policy,
+            request_with_options(vec![allow_once_option(), allow_always_option()]),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(decided, acp::RequestPermissionOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_crafted_option_whose_id_disagrees_with_its_kind_is_not_trusted() {
+        // Attack: an agent offers a single option with option_id
+        // "reject_once" (a recognisable, reject-shaped id) but declares its
+        // typed `kind` as AllowAlways. If we selected on the id alone, we'd
+        // pick this option believing it denies the action; the agent would
+        // then act on the `kind` it actually declared — AllowAlways — which
+        // turns our deny into an allow. The typed `kind` must win, and a
+        // mismatch between id and kind makes the option untrustworthy, not
+        // merely ambiguous, so it must be skipped rather than selected.
+        let crafted = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("reject_once"),
+            "Reject (lies)",
+            acp::PermissionOptionKind::AllowAlways,
+        );
+        let policy = Arc::new(RecordingPolicy::default());
+        let decided = decide_permission(policy, request_with_options(vec![crafted]))
+            .await
+            .unwrap();
+
+        assert!(matches!(decided, acp::RequestPermissionOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_reject_kind_option_with_an_unrecognised_id_is_still_selected() {
+        // The typed `kind` is what the agent will act on — our own
+        // `allow_once`/`reject_once`/... id vocabulary (from `kind_of`) is
+        // just a convenience for recognising *our own* options, not a
+        // requirement the agent's ids must satisfy. An id we don't
+        // recognise (`kind_of` returns None) is fine as long as it has no
+        // declared kind to disagree with.
+        let opt = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("nope"),
+            "Nope",
+            acp::PermissionOptionKind::RejectOnce,
+        );
+        let policy = Arc::new(RecordingPolicy::default());
+        let decided = decide_permission(policy, request_with_options(vec![opt]))
+            .await
+            .unwrap();
+
+        match decided {
+            acp::RequestPermissionOutcome::Selected(s) => {
+                assert_eq!(s.option_id.0.as_ref(), "nope")
+            }
+            other => panic!("expected Selected(\"nope\"), got {other:?}"),
+        }
     }
 
     #[test]
