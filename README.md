@@ -129,7 +129,7 @@ The moment a domain noun appears inside a `manch-*` crate, it has stopped being 
 
 ---
 
-## The four extension points
+## The five extension points
 
 Everything an external developer extends is a trait in `manch-protocol`.
 
@@ -139,6 +139,7 @@ Everything an external developer extends is a trait in `manch-protocol`.
 | `Tool` | What an agent can *do*. **This is where domain products plug in.** | docx generation, a workflow, an external API call. |
 | `Channel` | How the outside world reaches an agent. | CLI, Telegram, webhook. |
 | `MemoryStore` | How sessions persist and how context is assembled. | SQLite default; swap for Postgres or a retrieval-backed strategy. |
+| `PermissionPolicy` | Whether a `Draft` tool's proposed action reaches a human, and with what options. | ask-once (built in), a consumer's remembered-decision policy, deny-by-default. |
 
 ### Two ways to "build on it"
 
@@ -166,6 +167,46 @@ its native agent and its external ACP agents share one connection abstraction.)
    Codex, …) launched as a subprocess and driven over **ACP** by `manch-acp`. The
    external agent owns its own auth, model selection, and tools; Manch is the ACP
    *client* and streams its events through. No recompile, no source access.
+
+### Tiers and approval
+
+Every host-registered `Tool` declares a `tier()`: `Read` (safe to auto-execute)
+or `Draft` (a proposed mutation). Three things about this are deliberate:
+
+- **`tier()` is required, with no default.** A default of `Tier::Read` would
+  hand auto-execution to any tool author who never stopped to consider the
+  question. Declaring risk is not optional.
+- **There is no `Never` variant.** A tool that must never run is a tool that is
+  not registered — absence is not something a runtime needs to check for, so
+  encoding it as a tier would only add a state nothing can reach.
+- **A `Draft` call suspends the turn; it does not block a thread.** When a
+  `PermissionPolicy` wants a human, `manch-core` returns `TurnOutcome::AwaitingApproval`
+  and the caller resumes later with a decision — the suspension can outlive the
+  request, cross a process boundary, or wait on a Telegram reply. Consumers who
+  just want the linear "ask, then run" shape can use `Manch::handle_with_approver`,
+  a thin loop over `handle`/`approve` for exactly that case.
+
+### Known limitations
+
+Found during implementation; documented rather than hidden.
+
+- **A discarded batch can leave a UI showing a call that has no stored
+  record.** When a turn issues several tool calls and a later one in the same
+  batch errors, the whole batch is dropped from memory — `MemoryStore` is
+  append-only with no compensating delete, so atomicity comes from not writing
+  yet, not from rolling back. But a call earlier in the batch that already
+  succeeded has *already* emitted `ToolCallStatus::Completed` to the event
+  sink before the batch's fate is known. A UI driven off that stream can
+  therefore show a call as completed that, moments later, corresponds to
+  nothing in the persisted transcript.
+- **Gemini tool-call ids are synthesised, and repeat calls are paired by
+  order, not identity.** Gemini's wire format supplies no call id, so Manch
+  synthesises one from the part's position in the response. Gemini also keys
+  `functionResponse` (the result) by tool *name*, not by id — so when one turn
+  calls the same tool twice, which result belongs to which call is genuinely
+  ambiguous on Gemini's own wire. Manch preserves issue order (never
+  reordering or merging), which is the best available reading, not a
+  guaranteed-correct one.
 
 ### The BYOK completion layer: thin hand-rolled clients, not a framework
 

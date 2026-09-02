@@ -1,8 +1,9 @@
 //! # manch-protocol
 //!
-//! The contracts for [Manch](https://github.com/manchhq/manch): the four traits
+//! The contracts for [Manch](https://github.com/manchhq/manch): the five traits
 //! every consumer implements to extend the substrate — [`Agent`], [`Tool`],
-//! [`Channel`], and [`MemoryStore`] — plus the shared message/event vocabulary.
+//! [`Channel`], [`MemoryStore`], and [`PermissionPolicy`] — plus the shared
+//! message/event vocabulary.
 //!
 //! ## We build on ACP, we do not reinvent it
 //!
@@ -31,6 +32,24 @@
 //!
 //! In both paths the *reporting* vocabulary is ACP's, so a UI renders tool
 //! activity identically regardless of which path produced it.
+//!
+//! ### Why [`ToolInvocation`] exists instead of `acp::ToolCall`
+//!
+//! ACP gives Manch rich vocabulary for *reporting* a tool call
+//! ([`acp::ToolCall`], [`acp::ToolCallUpdate`]) and for *permission*
+//! ([`acp::RequestPermissionRequest`], [`acp::PermissionOption`]) — but
+//! deliberately none for *dispatch*. [`acp::ToolCall`] has no `name` field: it
+//! carries a human-readable `title` for display, because in ACP the agent
+//! dispatches its own tools and never needs to tell anyone else which function
+//! to call. There is nothing to "fix" here by reaching for `acp::ToolCall` —
+//! the field is missing on purpose.
+//!
+//! [`ToolInvocation`] lives inside Manch's one documented divergence (host-
+//! registered tools, above): it is the minimal id/name/arguments triple
+//! `manch-core` needs to look a [`Tool`] up by name and call it, on the one
+//! path where Manch — not an external agent — owns the loop. It is not a
+//! parallel content or event enum; reporting still flows through ACP's own
+//! types.
 
 use std::sync::Arc;
 
