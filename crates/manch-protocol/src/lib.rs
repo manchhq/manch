@@ -1,8 +1,13 @@
 //! # manch-protocol
 //!
-//! The contracts for [Manch](https://github.com/manchhq/manch): the four traits
-//! every consumer implements to extend the substrate — [`Agent`], [`Tool`],
-//! [`Channel`], and [`MemoryStore`] — plus the shared message/event vocabulary.
+//! The contracts for [Manch](https://github.com/manchhq/manch): the five
+//! extension points every consumer implements to extend the substrate —
+//! [`Agent`] (1), [`Tool`] (2), [`Channel`] (3), [`MemoryStore`] (4) and
+//! [`PermissionPolicy`] (5) — plus the shared message/event vocabulary.
+//!
+//! [`Approver`] is *not* a sixth: it is a blocking convenience over the
+//! suspend/resume primitive, for consumers that can hold a call open across a
+//! human decision.
 //!
 //! ## We build on ACP, we do not reinvent it
 //!
@@ -31,6 +36,24 @@
 //!
 //! In both paths the *reporting* vocabulary is ACP's, so a UI renders tool
 //! activity identically regardless of which path produced it.
+//!
+//! ### Why [`ToolInvocation`] exists instead of `acp::ToolCall`
+//!
+//! ACP gives Manch rich vocabulary for *reporting* a tool call
+//! ([`acp::ToolCall`], [`acp::ToolCallUpdate`]) and for *permission*
+//! ([`acp::RequestPermissionRequest`], [`acp::PermissionOption`]) — but
+//! deliberately none for *dispatch*. [`acp::ToolCall`] has no `name` field: it
+//! carries a human-readable `title` for display, because in ACP the agent
+//! dispatches its own tools and never needs to tell anyone else which function
+//! to call. There is nothing to "fix" here by reaching for `acp::ToolCall` —
+//! the field is missing on purpose.
+//!
+//! [`ToolInvocation`] lives inside Manch's one documented divergence (host-
+//! registered tools, above): it is the minimal id/name/arguments triple
+//! `manch-core` needs to look a [`Tool`] up by name and call it, on the one
+//! path where Manch — not an external agent — owns the loop. It is not a
+//! parallel content or event enum; reporting still flows through ACP's own
+//! types.
 
 use std::sync::Arc;
 
@@ -41,13 +64,25 @@ use serde::{Deserialize, Serialize};
 /// does not define parallel content/event enums.
 pub mod acp {
     pub use agent_client_protocol::schema::v1::{
-        ContentBlock, ContentChunk, PromptRequest, PromptResponse, SessionNotification,
-        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
-        ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        Content, ContentBlock, ContentChunk, PermissionOption, PermissionOptionId,
+        PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
+        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
+        ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 }
 
-use acp::{ContentBlock, StopReason, ToolCall, ToolCallContent, ToolKind};
+use acp::{ContentBlock, StopReason};
+
+mod memory;
+mod permission;
+mod tool;
+
+pub use memory::{Entry, MemoryStore, Turn, coalesce_turns};
+pub use permission::{
+    Approver, AskOncePolicy, PermissionDecision, PermissionPolicy, kind_of, once_options,
+};
+pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
 #[derive(Debug, thiserror::Error)]
@@ -72,13 +107,6 @@ pub enum Role {
     Assistant,
 }
 
-/// One role-attributed span of the conversation: contiguous same-role blocks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Turn {
-    pub role: Role,
-    pub blocks: Vec<ContentBlock>,
-}
-
 /// Context assembled by a [`MemoryStore`] and handed to an [`Agent`] for a turn.
 ///
 /// Role lives here, not in [`ContentBlock`]: ACP keeps author in its *streaming*
@@ -91,24 +119,26 @@ pub struct Context {
     pub turns: Vec<Turn>,
 }
 
-/// Fold an ordered `(role, block)` log into [`Turn`]s by merging runs of the
-/// same role. The one place turn-grouping lives, so every [`MemoryStore`]
-/// coalesces identically.
-pub fn coalesce_turns(items: impl IntoIterator<Item = (Role, ContentBlock)>) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = Vec::new();
-    for (role, block) in items {
-        match turns.last_mut() {
-            Some(last) if last.role == role => last.blocks.push(block),
-            _ => turns.push(Turn {
-                role,
-                blocks: vec![block],
-            }),
-        }
-    }
-    turns
+/// Token counts reported by a provider for a turn. Both fields are optional
+/// because the three provider dialects report them at different moments and not
+/// always together — Anthropic sends input at `message_start` and output at
+/// `message_delta`, Gemini repeats a running total per chunk, OpenAI sends one
+/// final block. Manch forwards what it is told and does not accumulate; a
+/// consumer that needs a running total sums the events it receives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
 }
 
 /// A streamed unit of progress from an [`Agent`] during a turn.
+///
+/// `ToolInvocation` is intentionally small (id/name/args); `acp::SessionUpdate`
+/// is ACP's own, much larger type. Boxing `Update`'s payload to close that gap
+/// would ripple `Box`/deref through every call site across the workspace that
+/// matches on it — out of proportion to the lint. Sizes are known at each
+/// match, so the variance costs nothing but the enum's own stack slot.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     /// A streamed update in ACP's own vocabulary (content chunk, tool-call
@@ -116,7 +146,11 @@ pub enum AgentEvent {
     Update(acp::SessionUpdate),
     /// **BYOK path only.** The model has requested a host-registered tool; the
     /// runtime must dispatch it via [`Tool::call`] and re-prompt with the result.
-    ToolCall(ToolCall),
+    ToolCall(ToolInvocation),
+    /// Provider-reported token counts. Emitted as they arrive, so a turn may
+    /// produce several. Never trusted for billing — a managed tier meters at its
+    /// own proxy rather than believing a client-side total.
+    Usage(Usage),
     /// The turn finished.
     Done(StopReason),
 }
@@ -139,19 +173,12 @@ pub trait EventSink: Send + Sync {
     async fn emit(&self, event: AgentEvent) -> Result<()>;
 }
 
-/// Describes a host-registered [`Tool`] to the model (BYOK path). Mirrors the
-/// shape an LLM tool-use API expects.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolSchema {
-    pub name: String,
-    pub description: String,
-    /// ACP's tool taxonomy, so UIs categorise host tools and agent-owned tools alike.
-    pub kind: ToolKind,
-    /// JSON Schema for the tool's arguments.
-    pub input_schema: serde_json::Value,
-}
-
-// ── The four extension points ───────────────────────────────────────────────
+// ── The extension points ────────────────────────────────────────────────────
+//
+// Five in total, numbered in the order the crate docs and README list them:
+// 1 `Agent` and 3 `Channel` are declared here; 2 [`Tool`] lives in `tool.rs`,
+// 4 [`MemoryStore`] in `memory.rs`, and 5 [`PermissionPolicy`] in
+// `permission.rs`.
 
 /// **Extension point 1.** How a model/agent is invoked and streams events back.
 ///
@@ -173,17 +200,6 @@ pub trait Agent: Send + Sync {
     ) -> Result<StopReason>;
 }
 
-/// **Extension point 2.** What an agent can *do*. **This is where domain products
-/// plug in** (host-registered, BYOK path — see crate docs).
-#[async_trait]
-pub trait Tool: Send + Sync {
-    /// The schema advertised to the model.
-    fn schema(&self) -> ToolSchema;
-
-    /// Execute the tool with model-supplied JSON arguments.
-    async fn call(&self, args: serde_json::Value) -> Result<ToolCallContent>;
-}
-
 /// **Extension point 3.** How the outside world reaches an agent. ACP deliberately
 /// does not cover transport/ingress, so this is wholly Manch's.
 ///
@@ -198,19 +214,50 @@ pub trait Channel: Send + Sync {
     async fn serve(&self, handler: Arc<dyn PromptHandler>) -> Result<()>;
 }
 
-/// **Extension point 4.** How sessions persist and how context is assembled. ACP
-/// deliberately does not cover persistence, so this is wholly Manch's.
+/// How a turn ended — or why it stopped early.
 ///
-/// Implementations: SQLite default (`manch-memory`); swap for Postgres or a
-/// retrieval-backed strategy.
-#[async_trait]
-pub trait MemoryStore: Send + Sync {
-    /// Append a role-tagged content block to a session's append-only history.
-    async fn append(&self, session_id: &str, role: Role, block: ContentBlock) -> Result<()>;
-
-    /// Assemble the context for the next turn. **The seam** — retrieval,
-    /// summarisation, and compaction all live behind this one method.
-    async fn assemble_context(&self, session_id: &str) -> Result<Context>;
+/// A [`Tier::Draft`] tool may not execute until a human has approved it, and a
+/// human decision has no bounded duration: it can outlive an HTTP request, a
+/// websocket, or the process itself. So the turn *suspends* rather than
+/// awaiting inline. The caller holds the returned `request` (the question to
+/// put to the human), `pending` (the exact action being asked about) and
+/// `agent_id` for as long as the decision takes, then resumes with
+/// `Manch::approve`.
+///
+/// Suspend/resume is the primitive because it is the more general of the two
+/// shapes: a blocking approver is constructible from it (await a decision, then
+/// resume), while stateless suspension is *not* constructible from a blocking
+/// await. `manch-core` ships a blocking convenience wrapper on top —
+/// `Manch::handle_with_approver`, a thin loop over `handle`/`approve` for a
+/// consumer (desktop, CLI) that can hold a call open across the decision.
+// `RequestPermissionRequest` embeds ACP's own `ToolCallUpdate`, so
+// `AwaitingApproval` is much larger than `Finished(StopReason)`. Boxing it
+// would push a `Box`/deref through every consumer that matches on the outcome —
+// out of proportion to the lint, and the same call made for `AgentEvent` and
+// `Entry`. Sizes are known at each match, so the variance costs nothing but the
+// enum's own stack slot.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnOutcome {
+    /// The turn ran to completion, with ACP's own reason.
+    Finished(StopReason),
+    /// A [`Tier::Draft`] tool is waiting on a human decision. Nothing about it
+    /// has executed yet.
+    AwaitingApproval {
+        /// The permission question, in ACP's own `session/request_permission`
+        /// vocabulary, so a UI renders it exactly as it renders an ACP agent's.
+        request: acp::RequestPermissionRequest,
+        /// The invocation the human is being shown. Resuming dispatches *this*
+        /// value rather than re-prompting the model, so the action that runs is
+        /// exactly the action that was approved.
+        pending: ToolInvocation,
+        /// The agent that proposed `pending`, so the resumed turn re-prompts
+        /// the same one. Carried here rather than remembered by the runtime:
+        /// the suspension may cross a process boundary, and a runtime that held
+        /// per-session state between `handle` and `approve` would not survive
+        /// it.
+        agent_id: String,
+    },
 }
 
 /// The runtime surface a [`Channel`] calls to drive a turn. Implemented by
@@ -220,13 +267,22 @@ pub trait MemoryStore: Send + Sync {
 pub trait PromptHandler: Send + Sync {
     /// Drive one turn for `agent_id` in `session_id` with the inbound `message`,
     /// streaming progress to `sink`.
+    ///
+    /// `ext` is the host-supplied context handed to every [`Tool`] this turn
+    /// dispatches. It is passed per call, not held by the runtime, so a
+    /// request-scoped value (a tenant, a grant, a connection) belongs to the
+    /// request that supplied it.
+    ///
+    /// Returns [`TurnOutcome`]: either the turn finished, or it suspended
+    /// awaiting a human's permission decision.
     async fn handle(
         &self,
         agent_id: &str,
         session_id: &str,
         message: Vec<ContentBlock>,
+        ext: Arc<Extensions>,
         sink: Arc<dyn EventSink>,
-    ) -> Result<StopReason>;
+    ) -> Result<TurnOutcome>;
 }
 
 #[cfg(test)]
@@ -244,23 +300,5 @@ mod tests {
             },
             _ => panic!("expected AgentMessageChunk update"),
         }
-    }
-
-    #[test]
-    fn coalesce_merges_runs_of_same_role() {
-        use acp::{ContentBlock, TextContent};
-        let b = |s: &str| ContentBlock::Text(TextContent::new(s.to_string()));
-        let turns = coalesce_turns([
-            (Role::User, b("a")),
-            (Role::User, b("b")),
-            (Role::Assistant, b("c")),
-            (Role::User, b("d")),
-        ]);
-        assert_eq!(turns.len(), 3);
-        assert_eq!(turns[0].role, Role::User);
-        assert_eq!(turns[0].blocks.len(), 2);
-        assert_eq!(turns[1].role, Role::Assistant);
-        assert_eq!(turns[2].role, Role::User);
-        assert_eq!(turns[2].blocks.len(), 1);
     }
 }

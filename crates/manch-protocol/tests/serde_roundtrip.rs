@@ -2,7 +2,7 @@
 //! round-trip unchanged. A stable wire contract is the reason this crate exists.
 
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent, ToolKind};
-use manch_protocol::{Context, Role, ToolSchema, Turn};
+use manch_protocol::{Context, Entry, Role, ToolSchema, Turn};
 use proptest::prelude::*;
 
 /// Arbitrary JSON values, deliberately excluding floats so equality is exact
@@ -61,9 +61,9 @@ fn arb_role() -> impl Strategy<Value = Role> {
 fn arb_turn() -> impl Strategy<Value = Turn> {
     (arb_role(), prop::collection::vec(any::<String>(), 0..4)).prop_map(|(role, texts)| Turn {
         role,
-        blocks: texts
+        entries: texts
             .into_iter()
-            .map(|t| ContentBlock::Text(TextContent::new(t)))
+            .map(|t| Entry::Block(ContentBlock::Text(TextContent::new(t))))
             .collect(),
     })
 }
