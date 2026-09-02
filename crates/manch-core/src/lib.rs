@@ -9,6 +9,7 @@
 mod testing;
 
 mod builder;
+mod dispatch;
 mod store;
 mod turn;
 
@@ -19,10 +20,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use builder::ManchBuilder;
+use dispatch::{Applied, Batch, Buffer};
+use manch_protocol::acp;
 use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
 use manch_protocol::{
     Agent, AgentEvent, Channel, Entry, Error, EventSink, Extensions, MemoryStore, PermissionPolicy,
-    PromptHandler, Result, Role, Tool, ToolContext, ToolSchema,
+    PromptHandler, Result, Role, Tool, ToolContext, ToolInvocation, ToolSchema, TurnOutcome,
 };
 use turn::InterceptSink;
 
@@ -42,9 +45,8 @@ pub struct Manch {
     /// executes. Manch ships a seam ([`PermissionPolicy`]) and a safe default
     /// (always ask), not a permission policy of its own.
     ///
-    /// Unread until `handle` consults it before dispatching `Draft`-tier
-    /// tools (Task 7).
-    #[allow(dead_code)]
+    /// Consulted by [`Manch::run_batch`] before any `Draft`-tier tool is
+    /// dispatched.
     pub(crate) policy: Arc<dyn PermissionPolicy>,
 }
 
@@ -64,36 +66,72 @@ impl Manch {
     pub fn builder() -> ManchBuilder {
         ManchBuilder::default()
     }
-}
 
-#[async_trait]
-impl PromptHandler for Manch {
-    // Persistence: inbound user blocks (User), the agent's own streamed text
-    // (Assistant, accumulated per sub-turn in `InterceptSink`), the assistant's
-    // tool_use request (Assistant, `Entry::ToolCall`), and the host-tool's
-    // result (User, `Entry::ToolResult` — Anthropic's "tool_result lives in a
-    // user turn" shape). The `ToolCall` is appended *before* its `ToolResult`
-    // so a stored history is valid input for a second loop iteration —
-    // Anthropic rejects a `tool_result` with no preceding `tool_use`.
-    async fn handle(
+    /// Resolve a registered agent, or say which id was missing.
+    fn agent_for(&self, agent_id: &str) -> Result<Arc<dyn Agent>> {
+        self.agents
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| Error::NotFound(agent_id.to_string()))
+    }
+
+    /// Resume a turn suspended by [`TurnOutcome::AwaitingApproval`].
+    ///
+    /// `pending` is dispatched **as given**. The model is never re-prompted to
+    /// choose an action here, so the action that runs is exactly the action the
+    /// human was shown — a re-prompt could yield a different one, which would
+    /// make the confirmation meaningless.
+    ///
+    /// `ext` is supplied again rather than replayed from the call that
+    /// suspended: the suspension may cross a process boundary, and a
+    /// request-scoped grant should be rebuilt from the request that resumes the
+    /// turn, not from the one that proposed it.
+    ///
+    /// An allow-kind outcome dispatches `pending`; a reject-kind records the
+    /// refusal as a `ToolResult` so the model can respond to it;
+    /// [`acp::RequestPermissionOutcome::Cancelled`] ends the turn. In the first
+    /// two cases the loop then continues — re-prompting *after* a result is not
+    /// re-deciding, because the approved action has already run. That
+    /// continuation gets a fresh [`MAX_TOOL_ITERS`] budget: a human decision is
+    /// not a loop iteration, and the cap exists to stop a model spinning
+    /// unattended, which a resumed turn by definition is not.
+    pub async fn approve(
         &self,
         agent_id: &str,
         session_id: &str,
-        message: Vec<ContentBlock>,
+        ext: Arc<Extensions>,
+        pending: ToolInvocation,
+        outcome: acp::RequestPermissionOutcome,
         sink: Arc<dyn EventSink>,
-    ) -> Result<StopReason> {
-        let agent = self
-            .agents
-            .get(agent_id)
-            .ok_or_else(|| Error::NotFound(agent_id.to_string()))?
-            .clone();
+    ) -> Result<TurnOutcome> {
+        let agent = self.agent_for(agent_id)?;
+        let tool = self.tool_for(&pending)?;
+        let cx = ToolContext::new(session_id, &pending.id, ext.clone());
 
-        for block in message {
-            self.memory
-                .append(session_id, Role::User, Entry::Block(block))
-                .await?;
+        // Same rule as a batch: nothing is written until the outcome has been
+        // applied without error.
+        let mut buf = Buffer::new();
+        let applied =
+            dispatch::apply(tool.as_ref(), &cx, &pending, &outcome, &sink, &mut buf).await?;
+        buf.flush(self.memory.as_ref(), session_id).await?;
+
+        if matches!(applied, Applied::Cancelled) {
+            sink.emit(AgentEvent::Done(StopReason::Cancelled)).await?;
+            return Ok(TurnOutcome::Finished(StopReason::Cancelled));
         }
 
+        self.drive(agent, agent_id, session_id, ext, sink).await
+    }
+
+    /// Drive prompt → tool → re-prompt until the turn finishes or suspends.
+    async fn drive(
+        &self,
+        agent: Arc<dyn Agent>,
+        agent_id: &str,
+        session_id: &str,
+        ext: Arc<Extensions>,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<TurnOutcome> {
         let schemas: Vec<ToolSchema> = self.tools.values().map(|t| t.schema()).collect();
 
         for _ in 0..MAX_TOOL_ITERS {
@@ -114,42 +152,67 @@ impl PromptHandler for Manch {
             let calls = intercept.take_calls();
             if calls.is_empty() {
                 sink.emit(AgentEvent::Done(stop)).await?;
-                return Ok(stop);
+                return Ok(TurnOutcome::Finished(stop));
             }
 
-            // Edge case (untested; only single-call turns are exercised today):
-            // if a turn emits multiple tool calls and a later one errors, the
-            // earlier results in this batch are already appended to memory
-            // before the `?` below propagates the error.
-            for inv in calls {
-                let tool = self
-                    .tools
-                    .get(&inv.name)
-                    .ok_or_else(|| Error::NotFound(inv.name.clone()))?;
-                // Persist the request before dispatching it, so a mid-call error
-                // still leaves a valid tool_use/tool_result pairing in history.
-                self.memory
-                    .append(session_id, Role::Assistant, Entry::ToolCall(inv.clone()))
-                    .await?;
-                // Task 7 threads the caller's Extensions through `handle`; until then the
-                // context carries only what Manch itself knows.
-                let cx = ToolContext::new(session_id, &inv.id, Arc::new(Extensions::default()));
-                let result = tool.call(&cx, inv.arguments.clone()).await?;
-                self.memory
-                    .append(
-                        session_id,
-                        Role::User,
-                        Entry::ToolResult {
-                            id: inv.id.clone(),
-                            content: vec![result],
-                        },
-                    )
-                    .await?;
+            // Results are buffered, never appended as they are produced. The `?`
+            // below drops the buffer, so a call that errors mid-batch leaves no
+            // partial record of the calls that ran before it.
+            let mut buf = Buffer::new();
+            let batch = self
+                .run_batch(session_id, &ext, &sink, calls, &mut buf)
+                .await?;
+            // Past this point the batch resolved, so what it did buffer is final
+            // and gets written — including on suspension, where the calls before
+            // the suspending one have already run.
+            buf.flush(self.memory.as_ref(), session_id).await?;
+            match batch {
+                Batch::Completed => {}
+                Batch::Cancelled => {
+                    sink.emit(AgentEvent::Done(StopReason::Cancelled)).await?;
+                    return Ok(TurnOutcome::Finished(StopReason::Cancelled));
+                }
+                Batch::Suspended { request, pending } => {
+                    return Ok(TurnOutcome::AwaitingApproval {
+                        request: *request,
+                        pending,
+                        agent_id: agent_id.to_string(),
+                    });
+                }
             }
         }
 
         Err(Error::Other(format!(
             "tool-call loop exceeded {MAX_TOOL_ITERS} iterations"
         )))
+    }
+}
+
+#[async_trait]
+impl PromptHandler for Manch {
+    // Persistence: inbound user blocks (User), the agent's own streamed text
+    // (Assistant, accumulated per sub-turn in `InterceptSink`), the assistant's
+    // tool_use request (Assistant, `Entry::ToolCall`), and the host-tool's
+    // result (User, `Entry::ToolResult` — Anthropic's "tool_result lives in a
+    // user turn" shape). The `ToolCall` is appended *before* its `ToolResult`
+    // so a stored history is valid input for a second loop iteration —
+    // Anthropic rejects a `tool_result` with no preceding `tool_use`.
+    async fn handle(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        message: Vec<ContentBlock>,
+        ext: Arc<Extensions>,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<TurnOutcome> {
+        let agent = self.agent_for(agent_id)?;
+
+        for block in message {
+            self.memory
+                .append(session_id, Role::User, Entry::Block(block))
+                .await?;
+        }
+
+        self.drive(agent, agent_id, session_id, ext, sink).await
     }
 }

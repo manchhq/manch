@@ -76,7 +76,8 @@ mod tests {
     use manch_protocol::PromptHandler;
     use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
     use manch_protocol::{
-        AgentEvent, Entry, Error, EventSink, MemoryStore, Role, Tier, Tool, ToolInvocation, Usage,
+        AgentEvent, Entry, Error, EventSink, Extensions, MemoryStore, Role, Tier, Tool,
+        ToolInvocation, TurnOutcome, Usage,
     };
 
     use crate::Manch;
@@ -102,6 +103,11 @@ mod tests {
 
     fn user_msg(text: &str) -> Vec<ContentBlock> {
         vec![ContentBlock::Text(TextContent::new(text.to_string()))]
+    }
+
+    /// Empty host context — these tests exercise the loop, not extensions.
+    fn ext() -> Arc<Extensions> {
+        Arc::new(Extensions::default())
     }
 
     /// Build an `AgentEvent::ToolCall` addressed to a registered tool by name.
@@ -142,7 +148,7 @@ mod tests {
 
         let sink = Arc::new(CollectSink::new());
         manch
-            .handle("a", "s", user_msg("find asha"), sink)
+            .handle("a", "s", user_msg("find asha"), ext(), sink)
             .await
             .unwrap();
         assert!(log.lock().unwrap().contains(&"search_patients".to_string()));
@@ -162,7 +168,7 @@ mod tests {
             .unwrap();
         let sink = Arc::new(CollectSink::new());
         let err = manch
-            .handle("nope", "s", user_msg("hi"), sink.clone())
+            .handle("nope", "s", user_msg("hi"), ext(), sink.clone())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
@@ -186,12 +192,15 @@ mod tests {
             .unwrap();
         let sink = Arc::new(CollectSink::new());
 
-        let stop = manch
-            .handle("a", "s", user_msg("hi"), sink.clone())
+        let outcome = manch
+            .handle("a", "s", user_msg("hi"), ext(), sink.clone())
             .await
             .unwrap();
 
-        assert!(matches!(stop, StopReason::EndTurn));
+        assert!(matches!(
+            outcome,
+            TurnOutcome::Finished(StopReason::EndTurn)
+        ));
         let evs = sink.events();
         // one text Update forwarded + exactly one final Done (agent's own Done swallowed).
         let updates = evs
@@ -234,7 +243,7 @@ mod tests {
         let sink = Arc::new(CollectSink::new());
 
         manch
-            .handle("a", "s", user_msg("hi"), sink.clone())
+            .handle("a", "s", user_msg("hi"), ext(), sink.clone())
             .await
             .unwrap();
 
@@ -278,7 +287,10 @@ mod tests {
             .unwrap();
         let sink = Arc::new(CollectSink::new());
 
-        manch.handle("a", "s", user_msg("hi"), sink).await.unwrap();
+        manch
+            .handle("a", "s", user_msg("hi"), ext(), sink)
+            .await
+            .unwrap();
 
         let entries = store.entries();
         let call_at = entries
@@ -305,7 +317,7 @@ mod tests {
             .unwrap();
         let sink = Arc::new(CollectSink::new());
         let err = manch
-            .handle("a", "s", user_msg("hi"), sink)
+            .handle("a", "s", user_msg("hi"), ext(), sink)
             .await
             .unwrap_err();
         assert!(matches!(err, Error::NotFound(name) if name == "ghost"));
@@ -323,7 +335,7 @@ mod tests {
             .unwrap();
         let sink = Arc::new(CollectSink::new());
         let err = manch
-            .handle("a", "s", user_msg("hi"), sink)
+            .handle("a", "s", user_msg("hi"), ext(), sink)
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Other(_)));
@@ -353,7 +365,7 @@ mod tests {
         let sink = Arc::new(CollectSink::new());
 
         manch
-            .handle("a", "s", user_msg("first"), sink.clone())
+            .handle("a", "s", user_msg("first"), ext(), sink.clone())
             .await
             .unwrap();
 
@@ -370,7 +382,7 @@ mod tests {
         }
 
         manch
-            .handle("a", "s", user_msg("second"), sink.clone())
+            .handle("a", "s", user_msg("second"), ext(), sink.clone())
             .await
             .unwrap();
 
@@ -393,7 +405,7 @@ mod tests {
             .unwrap();
         let sink = Arc::new(CollectSink::new());
         let err = manch
-            .handle("a", "s", user_msg("hi"), sink)
+            .handle("a", "s", user_msg("hi"), ext(), sink)
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Other(msg) if msg.contains("exceeded")));

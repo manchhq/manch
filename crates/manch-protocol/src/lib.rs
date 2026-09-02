@@ -43,9 +43,9 @@ pub mod acp {
     pub use agent_client_protocol::schema::v1::{
         Content, ContentBlock, ContentChunk, PermissionOption, PermissionOptionId,
         PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
         SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 }
 
@@ -184,6 +184,50 @@ pub trait Channel: Send + Sync {
     async fn serve(&self, handler: Arc<dyn PromptHandler>) -> Result<()>;
 }
 
+/// How a turn ended — or why it stopped early.
+///
+/// A [`Tier::Draft`] tool may not execute until a human has approved it, and a
+/// human decision has no bounded duration: it can outlive an HTTP request, a
+/// websocket, or the process itself. So the turn *suspends* rather than
+/// awaiting inline. The caller holds the returned `request` (the question to
+/// put to the human), `pending` (the exact action being asked about) and
+/// `agent_id` for as long as the decision takes, then resumes with
+/// `Manch::approve`.
+///
+/// Suspend/resume is the primitive because it is the more general of the two
+/// shapes: a blocking approver is constructible from it (await a decision, then
+/// resume), while stateless suspension is *not* constructible from a blocking
+/// await. `manch-core` ships a blocking convenience wrapper on top.
+// `RequestPermissionRequest` embeds ACP's own `ToolCallUpdate`, so
+// `AwaitingApproval` is much larger than `Finished(StopReason)`. Boxing it
+// would push a `Box`/deref through every consumer that matches on the outcome —
+// out of proportion to the lint, and the same call made for `AgentEvent` and
+// `Entry`. Sizes are known at each match, so the variance costs nothing but the
+// enum's own stack slot.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnOutcome {
+    /// The turn ran to completion, with ACP's own reason.
+    Finished(StopReason),
+    /// A [`Tier::Draft`] tool is waiting on a human decision. Nothing about it
+    /// has executed yet.
+    AwaitingApproval {
+        /// The permission question, in ACP's own `session/request_permission`
+        /// vocabulary, so a UI renders it exactly as it renders an ACP agent's.
+        request: acp::RequestPermissionRequest,
+        /// The invocation the human is being shown. Resuming dispatches *this*
+        /// value rather than re-prompting the model, so the action that runs is
+        /// exactly the action that was approved.
+        pending: ToolInvocation,
+        /// The agent that proposed `pending`, so the resumed turn re-prompts
+        /// the same one. Carried here rather than remembered by the runtime:
+        /// the suspension may cross a process boundary, and a runtime that held
+        /// per-session state between `handle` and `approve` would not survive
+        /// it.
+        agent_id: String,
+    },
+}
+
 /// The runtime surface a [`Channel`] calls to drive a turn. Implemented by
 /// `manch-core`; lives here so [`Channel`] implementations need not depend on the
 /// runtime crate.
@@ -191,13 +235,22 @@ pub trait Channel: Send + Sync {
 pub trait PromptHandler: Send + Sync {
     /// Drive one turn for `agent_id` in `session_id` with the inbound `message`,
     /// streaming progress to `sink`.
+    ///
+    /// `ext` is the host-supplied context handed to every [`Tool`] this turn
+    /// dispatches. It is passed per call, not held by the runtime, so a
+    /// request-scoped value (a tenant, a grant, a connection) belongs to the
+    /// request that supplied it.
+    ///
+    /// Returns [`TurnOutcome`]: either the turn finished, or it suspended
+    /// awaiting a human's permission decision.
     async fn handle(
         &self,
         agent_id: &str,
         session_id: &str,
         message: Vec<ContentBlock>,
+        ext: Arc<Extensions>,
         sink: Arc<dyn EventSink>,
-    ) -> Result<StopReason>;
+    ) -> Result<TurnOutcome>;
 }
 
 #[cfg(test)]
