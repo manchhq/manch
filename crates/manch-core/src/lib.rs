@@ -217,18 +217,23 @@ impl Manch {
             match outcome {
                 TurnOutcome::Finished(stop) => return Ok(stop),
                 TurnOutcome::AwaitingApproval {
-                    agent_id,
+                    // Bound under a distinct name: shadowing the outer
+                    // `agent_id` parameter would let a later refactor
+                    // substitute it and still type-check, reintroducing
+                    // exactly the reconstruct-the-action bug this design
+                    // exists to prevent.
+                    agent_id: pending_agent_id,
                     request,
                     pending,
                 } => {
                     let decision = approver.approve(request).await?;
-                    // `agent_id` and `pending` come back out of the outcome
-                    // itself, not from anything reconstructed or looked up:
-                    // the action that runs is exactly the action the
-                    // `Approver` was shown.
+                    // `pending_agent_id` and `pending` come back out of the
+                    // outcome itself, not from anything reconstructed or
+                    // looked up: the action that runs is exactly the action
+                    // the `Approver` was shown.
                     outcome = self
                         .approve(
-                            &agent_id,
+                            &pending_agent_id,
                             session_id,
                             ext.clone(),
                             pending,

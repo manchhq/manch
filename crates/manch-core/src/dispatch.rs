@@ -528,6 +528,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_extensions_reach_the_tool_that_runs() {
+        // The per-call host-context extension point, end to end: whatever the
+        // caller put in `Extensions` must be visible to `Tool::call` through
+        // `cx.get::<T>()`. Without this, `ext.clone()` in run_batch could be
+        // replaced by a fresh default and every other test would still pass.
+        #[derive(Clone, PartialEq, Debug)]
+        struct Scope(&'static str);
+
+        /// Records whatever `Scope` it saw in its context (None if absent).
+        struct ScopeTool(Arc<Mutex<Vec<Option<Scope>>>>);
+
+        #[async_trait]
+        impl manch_protocol::Tool for ScopeTool {
+            fn schema(&self) -> manch_protocol::ToolSchema {
+                manch_protocol::ToolSchema {
+                    name: "peek".to_string(),
+                    description: String::new(),
+                    kind: acp::ToolKind::Other,
+                    input_schema: json!({ "type": "object" }),
+                }
+            }
+            fn tier(&self) -> Tier {
+                Tier::Read
+            }
+            async fn call(
+                &self,
+                cx: &ToolContext,
+                _args: serde_json::Value,
+            ) -> Result<acp::ToolCallContent> {
+                self.0.lock().unwrap().push(cx.get::<Scope>().cloned());
+                Ok(acp::ToolCallContent::Content(acp::Content::new(
+                    ContentBlock::Text(TextContent::new("ok".to_string())),
+                )))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let m = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new(
+                "a",
+                vec![vec![tool_call("c1", "peek", json!({}))], vec![]],
+            )))
+            .memory(Arc::new(MemStore::new()))
+            .tool(Arc::new(ScopeTool(seen.clone())))
+            .build()
+            .unwrap();
+
+        let mut extensions = Extensions::default();
+        extensions.insert(Scope("clinic-42"));
+        m.handle("a", "s", user_msg("go"), Arc::new(extensions), sink())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![Some(Scope("clinic-42"))],
+            "the host's Extensions must reach Tool::call"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unrecognised_option_id_is_an_error_and_runs_nothing() {
         // Deny-by-default on the resume path. `Manch::approve` is what a
         // stateless server calls with whatever the client sent back, so an
