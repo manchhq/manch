@@ -11,7 +11,17 @@ use manch_protocol::{
 use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
 pub(crate) const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
-pub(crate) const FALLBACK_MODEL: &str = "gemini-3-flash";
+// Stable alias — resolves to the current flash snapshot, so it won't rot like a
+// pinned id. Only hit if list-models fails. Matches the reasoning behind
+// `openai::FALLBACK_MODEL`.
+//
+// The previous value, `gemini-3-flash`, was not a model Google offers in any
+// form: the catalogue is versioned `3.1`/`3.5`/`3.6`/…, and the unversioned
+// names are the `-latest` aliases. It failed at request time rather than at
+// construction, so a consumer met it in production. Nothing offline could catch
+// that — the request body was encoded exactly as documented and was rejected on
+// the model name alone — which is what `tests/live.rs` exists to cover.
+pub(crate) const FALLBACK_MODEL: &str = "gemini-flash-latest";
 
 pub struct GeminiAgent {
     api_key: String,
@@ -585,8 +595,8 @@ mod tests {
     #[test]
     fn urls_derive_from_the_base() {
         assert_eq!(
-            stream_url("https://p/v1beta", "gemini-3-flash"),
-            "https://p/v1beta/models/gemini-3-flash:streamGenerateContent?alt=sse"
+            stream_url("https://p/v1beta", "gemini-flash-latest"),
+            "https://p/v1beta/models/gemini-flash-latest:streamGenerateContent?alt=sse"
         );
         assert_eq!(models_url("https://p/v1beta"), "https://p/v1beta/models");
     }
@@ -603,13 +613,13 @@ mod tests {
     fn parse_models_strips_models_prefix() {
         let body = serde_json::json!({
             "models": [{
-                "name": "models/gemini-3-flash",
+                "name": "models/gemini-flash-latest",
                 "displayName": "Gemini 3 Flash",
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]
             }]
         });
         let models = parse_models(&body);
-        assert_eq!(models[0].id, "gemini-3-flash");
+        assert_eq!(models[0].id, "gemini-flash-latest");
         assert_eq!(models[0].display_name.as_deref(), Some("Gemini 3 Flash"));
     }
 
@@ -618,7 +628,7 @@ mod tests {
         let body = serde_json::json!({
             "models": [
                 {
-                    "name": "models/gemini-3-flash",
+                    "name": "models/gemini-flash-latest",
                     "supportedGenerationMethods": ["streamGenerateContent"]
                 },
                 {
@@ -629,7 +639,7 @@ mod tests {
             ]
         });
         let ids: Vec<_> = parse_models(&body).into_iter().map(|m| m.id).collect();
-        assert_eq!(ids, vec!["gemini-3-flash"]);
+        assert_eq!(ids, vec!["gemini-flash-latest"]);
     }
 
     #[test]

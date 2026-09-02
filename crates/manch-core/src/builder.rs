@@ -16,6 +16,7 @@ pub struct ManchBuilder {
     channels: HashMap<String, Arc<dyn Channel>>,
     memory: Option<Arc<dyn MemoryStore>>,
     policy: Option<Arc<dyn PermissionPolicy>>,
+    max_tool_iters: Option<usize>,
 }
 
 impl ManchBuilder {
@@ -44,16 +45,40 @@ impl ManchBuilder {
         self.policy = Some(policy);
         self
     }
+    /// Caps prompt → tool → re-prompt cycles within one turn. Defaults to
+    /// [`crate::DEFAULT_MAX_TOOL_ITERS`]. Rejects `0`, which would mean a turn
+    /// that can never call a tool.
+    ///
+    /// **This budget is per continuation, not per conversation.** A turn that
+    /// suspends for a human decision and is resumed through
+    /// [`Manch::approve`](crate::Manch::approve) starts a fresh budget — a
+    /// human decision is not a model loop, so a person willing to keep
+    /// approving should not be cut off by a cap meant to stop a model spinning.
+    /// The consequence is that total steps across a suspend/resume cycle are
+    /// bounded by the *human*, not by this number. If a hard ceiling per
+    /// conversation is needed, count approvals on the calling side.
+    pub fn max_tool_iters(mut self, n: usize) -> Self {
+        self.max_tool_iters = Some(n);
+        self
+    }
     pub fn build(self) -> Result<Manch> {
         let memory = self
             .memory
             .ok_or_else(|| Error::Other("Manch::builder() requires a MemoryStore".to_string()))?;
+        let max_tool_iters = self.max_tool_iters.unwrap_or(crate::DEFAULT_MAX_TOOL_ITERS);
+        if max_tool_iters == 0 {
+            return Err(Error::Other(
+                "max_tool_iters must be at least 1; 0 means a turn that can never call a tool"
+                    .to_string(),
+            ));
+        }
         Ok(Manch {
             agents: Arc::new(self.agents),
             tools: Arc::new(self.tools),
             channels: Arc::new(self.channels),
             memory,
             policy: self.policy.unwrap_or_else(|| Arc::new(AskOncePolicy)),
+            max_tool_iters,
         })
     }
 }
@@ -67,6 +92,30 @@ mod tests {
     use crate::Manch;
     use crate::MemStore;
     use crate::testing::{EchoTool, ScriptAgent};
+
+    #[test]
+    fn the_step_cap_defaults_to_eight() {
+        let manch = Manch::builder()
+            .memory(Arc::new(MemStore::new()))
+            .build()
+            .unwrap();
+        assert_eq!(manch.max_tool_iters, crate::DEFAULT_MAX_TOOL_ITERS);
+    }
+
+    #[test]
+    fn max_tool_iters_rejects_zero() {
+        // A cap of 0 means a turn that can never dispatch a tool — almost
+        // certainly a mistake, and silently unreachable behaviour if allowed.
+        let err = Manch::builder()
+            .memory(Arc::new(MemStore::new()))
+            .max_tool_iters(0)
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains('0') || err.to_string().contains("zero"),
+            "got: {err}"
+        );
+    }
 
     #[test]
     fn build_requires_a_memory_store() {

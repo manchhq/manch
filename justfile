@@ -29,6 +29,10 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Build the docs the way docs.rs will; broken intra-doc links are errors
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
 # Cheap compile check of the whole workspace
 check:
     cargo check --workspace
@@ -71,7 +75,7 @@ build-desktop:
 
 # ── Aggregate ─────────────────────────────────────────
 # Run exactly what GitHub CI runs
-ci: gen fmt-check clippy test-rust lint test-js build-js
+ci: gen fmt-check clippy doc test-rust lint test-js build-js
     @echo "✓ CI checks passed"
 
 # ── Maintenance ───────────────────────────────────────

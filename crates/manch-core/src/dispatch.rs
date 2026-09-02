@@ -781,6 +781,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_custom_step_cap_is_respected() {
+        // Pins that the configured cap is USED, not merely stored: a model that
+        // only ever calls tools must stop after exactly `max_tool_iters` cycles.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let turns: Vec<Vec<AgentEvent>> = (0..32)
+            .map(|n| vec![tool_call(&format!("c{n}"), "list_appointments", json!({}))])
+            .collect();
+        let m = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new("a", turns)))
+            .tool(Arc::new(EchoTool::new(
+                "list_appointments",
+                Tier::Read,
+                log.clone(),
+            )))
+            .memory(Arc::new(MemStore::new()))
+            .max_tool_iters(2)
+            .build()
+            .unwrap();
+
+        let err = m
+            .handle("a", "s", user_msg("go"), ext(), sink())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains('2'),
+            "cap should name itself: {err}"
+        );
+        assert_eq!(
+            log.lock().unwrap().len(),
+            2,
+            "the tool ran more times than the cap allows"
+        );
+    }
+
+    #[tokio::test]
     async fn the_loop_terminates_when_a_model_calls_tools_forever() {
         // MAX_TOOL_ITERS = 8. A model that only ever emits tool calls must not spin.
         let (m, _log, _store) = manch_always_calls_a_tool();
