@@ -236,8 +236,7 @@ sanitisation) are **data**, not branches.
 
 **Pointing a client elsewhere.** Every BYOK agent resolves its endpoint as
 *explicit argument → `MANCH_{PROVIDER}_BASE_URL` → vendor default*, and the
-catalog endpoint follows the same base as the completion endpoint (so an
-overridden client never lists the vendor's model list by mistake):
+catalog endpoint is derived from the same base as the completion endpoint:
 
 ```rust
 // an OpenAI-compatible third party, or a self-hosted gateway
@@ -252,6 +251,17 @@ export MANCH_OPENAI_BASE_URL=https://api.fireworks.ai/inference/v1
 The explicit argument wins deliberately: a server routing several tenants
 through different proxies needs per-agent endpoints in one process, which an
 environment variable alone cannot express.
+
+Listing models, though, is a **free function** — there is no instance
+`list_models`, so an agent built with `.base_url(proxy)` does not redirect the
+catalog on its own. A caller that overrode the base per agent (rather than via
+the env var, which `list_models` does read) must thread that base through
+itself, reading it back with `base()`:
+
+```rust
+let agent = OpenAiAgent::new(key, None).base_url("https://api.fireworks.ai/inference/v1");
+let models = manch_llm::list_models_at("openai", &key, Some(agent.base())).await?;
+```
 
 **Token usage.** Providers report token counts differently — Anthropic splits
 input and output across two frames, Gemini repeats a running total per chunk,

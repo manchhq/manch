@@ -151,10 +151,13 @@ pub(crate) fn drain_sse(buf: &mut Vec<u8>, parse: impl Fn(&str) -> Vec<SseItem>)
 }
 
 /// Concatenate a turn's text blocks into one string. Non-text blocks and
-/// non-`Block` entries (a tool call is not prose) are ignored. Anthropic now
-/// wires `ToolCall`/`ToolResult` onto its own request shape when a turn
-/// carries one (see `anthropic::turn_content`); Gemini and OpenAI still fall
-/// back to this text-only mapping until Tasks 11-12.
+/// non-`Block` entries (a tool call is not prose) are ignored.
+///
+/// All three providers now wire `ToolCall`/`ToolResult` onto their own request
+/// shapes (`anthropic::turn_content`, `gemini::turn_parts`,
+/// `openai::turn_messages`), so this is the prose half of that mapping — the
+/// text a turn carries alongside its calls — not a fallback for providers
+/// that lack tool support.
 pub(crate) fn turn_text(turn: &Turn) -> String {
     turn.entries
         .iter()

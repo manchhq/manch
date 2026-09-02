@@ -35,6 +35,15 @@ impl GeminiAgent {
         self.base = crate::pick_base(Some(&base), None, &self.base);
         self
     }
+
+    /// The endpoint this agent resolved to. Thread it into
+    /// [`list_models_at`] so a redirected agent lists ITS catalog rather than
+    /// the vendor's — nothing does that automatically, because `list_models`
+    /// is a free function with no agent to read a base from.
+    #[must_use]
+    pub fn base(&self) -> &str {
+        &self.base
+    }
 }
 
 /// `{base}/models/{model}:streamGenerateContent?alt=sse`. Pure.
@@ -555,6 +564,16 @@ mod tests {
     #[test]
     fn new_defaults_to_the_vendor_base() {
         assert_eq!(GeminiAgent::new("k".into(), None).base, DEFAULT_BASE);
+    }
+
+    #[test]
+    fn base_is_readable_so_a_caller_can_thread_it_to_list_models_at() {
+        // `list_models` is a free function: an agent pointed at a proxy cannot
+        // redirect the catalog by itself. The caller must read the base back
+        // off the agent and pass it to `list_models_at`, which needs an
+        // accessor to be possible at all.
+        let agent = GeminiAgent::new("k".into(), None).base_url("https://proxy.internal/v9");
+        assert_eq!(agent.base(), "https://proxy.internal/v9");
     }
 
     #[test]

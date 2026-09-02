@@ -1,10 +1,11 @@
 //! The reference [`MemoryStore`] implementation: an in-process, in-memory log
 //! of role-tagged [`Entry`] values, coalesced into [`Turn`]s on read.
 //!
-//! `MemStore` is the store [`crate::Manch::builder`] reaches for when nothing
-//! more durable is wired up — it makes `Entry` handling and turn coalescing
-//! concrete and correct, and it's what this crate's own tests and examples
-//! build on. It is **not** a production persistence layer: everything lives
+//! `MemStore` is not a default: [`crate::Manch::builder`] selects no store on
+//! its own, and `build()` errors unless one is wired up with `.memory(…)`.
+//! This is the store to reach for when nothing more durable is needed — it
+//! makes `Entry` handling and turn coalescing concrete and correct, and it's
+//! what this crate's own tests and examples build on. It is **not** a production persistence layer: everything lives
 //! in a `Mutex<Vec<_>>`, so a process restart (or crash) loses every session
 //! it holds. A durable store — SQLite, Postgres, or anything that survives a
 //! restart — is a separate concern, left to another crate that implements the
