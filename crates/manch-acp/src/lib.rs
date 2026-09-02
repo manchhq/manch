@@ -173,6 +173,7 @@ pub(crate) async fn decide_permission(
         id: tool_call_id,
         name: req.tool_call.fields.title.clone().unwrap_or_default(),
         arguments: serde_json::Value::Null,
+        provider_meta: None,
     };
 
     match policy.decide(&cx, &inv).await? {

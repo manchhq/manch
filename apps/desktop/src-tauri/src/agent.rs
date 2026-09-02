@@ -177,6 +177,7 @@ mod tests {
             id: "c1".into(),
             name: "search_patients".into(),
             arguments: serde_json::json!({}),
+            provider_meta: None,
         });
         match map_event(ev) {
             Some(StreamEvent::Tool {

@@ -320,6 +320,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: json!({}),
+            provider_meta: None,
         }
     }
 
@@ -328,6 +329,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             arguments: args,
+            provider_meta: None,
         })
     }
 

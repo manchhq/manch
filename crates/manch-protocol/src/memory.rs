@@ -101,6 +101,7 @@ mod tests {
             id: "c1".into(),
             name: "t".into(),
             arguments: serde_json::Value::Null,
+            provider_meta: None,
         });
         let turns = coalesce_turns([
             (Role::User, b("hi")),
