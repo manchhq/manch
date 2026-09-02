@@ -2394,6 +2394,7 @@ name = "manch-llm"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures-util",
  "manch-protocol",
  "reqwest",

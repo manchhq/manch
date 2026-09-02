@@ -279,20 +279,29 @@ pub(crate) fn item_to_event(item: SseItem) -> Result<AgentEvent> {
     }
 }
 
-/// Shared SSE streaming loop: decode byte chunks (splitting on `\n` so multibyte
-/// UTF-8 stays whole), drain complete lines through `parse`, emit text live,
-/// surface a parsed stream error, assemble streamed tool calls via a
-/// stream-lifetime [`ToolAccum`] (flushed — and any calls still open thereby
-/// completed — when the byte stream ends), and emit `Done` last.
-pub(crate) async fn stream_sse(
-    resp: reqwest::Response,
+/// Drive the SSE loop over an arbitrary chunk source: decode byte chunks
+/// (splitting on `\n` so multibyte UTF-8 stays whole), drain complete lines
+/// through `parse`, emit text live, surface a parsed stream error, assemble
+/// streamed tool calls via a stream-lifetime [`ToolAccum`], **flush it before
+/// emitting `Done`** so any call still open when the stream ends is still
+/// reported, and emit `Done` last.
+///
+/// Split from [`stream_sse`] so the end-of-stream flush-before-`Done` ordering
+/// is unit-testable without a live HTTP response — a synthetic chunk stream
+/// (e.g. `futures_util::stream::iter`) exercises the same loop. This ordering
+/// is load-bearing, not incidental: OpenAI (Task 11) never marks an individual
+/// tool call finished, so this flush is the *only* signal that completes one.
+pub(crate) async fn stream_items<S>(
+    mut chunks: S,
     sink: &Arc<dyn EventSink>,
     parse: impl Fn(&str) -> Vec<SseItem>,
-) -> Result<StopReason> {
-    let mut stream = resp.bytes_stream();
+) -> Result<StopReason>
+where
+    S: futures_util::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
     let mut buf: Vec<u8> = Vec::new();
     let mut accum = ToolAccum::default();
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = chunks.next().await {
         buf.extend_from_slice(&chunk.map_err(err)?);
         for item in drain_sse(&mut buf, &parse) {
             match item {
@@ -312,6 +321,15 @@ pub(crate) async fn stream_sse(
     }
     sink.emit(AgentEvent::Done(StopReason::EndTurn)).await?;
     Ok(StopReason::EndTurn)
+}
+
+/// Thin wrapper: drive [`stream_items`] over a live HTTP response's byte stream.
+pub(crate) async fn stream_sse(
+    resp: reqwest::Response,
+    sink: &Arc<dyn EventSink>,
+    parse: impl Fn(&str) -> Vec<SseItem>,
+) -> Result<StopReason> {
+    stream_items(resp.bytes_stream(), sink, parse).await
 }
 
 /// Fetch selectable models for a BYOK provider id. Unknown / disabled providers
@@ -465,6 +483,92 @@ mod tests {
             AgentEvent::ToolCall(i) => assert_eq!(i.arguments, serde_json::json!({})),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn tool_accum_treats_malformed_arguments_as_null_not_empty_object() {
+        // Distinct from the empty-accumulation case above: a genuinely
+        // unparsable accumulation must not panic, but it also must not be
+        // silently treated as "no arguments" (`{}`) — that would hide a real
+        // wire-format problem behind a value that looks intentional.
+        let mut acc = ToolAccum::default();
+        acc.apply(SseItem::ToolCallStart {
+            index: 0,
+            id: "c".into(),
+            name: "n".into(),
+        });
+        acc.apply(SseItem::ToolCallArgs {
+            index: 0,
+            json: "{not valid json".into(),
+        });
+        let ev = acc.apply(SseItem::ToolCallEnd { index: 0 }).unwrap();
+        match ev {
+            AgentEvent::ToolCall(i) => assert_eq!(i.arguments, serde_json::Value::Null),
+            _ => panic!(),
+        }
+    }
+
+    /// A local `EventSink` that records every emitted event for order
+    /// assertions. `manch-llm` has no reason to depend on `manch-core`'s test
+    /// mocks (a different crate), so this is deliberately small and local.
+    #[derive(Clone, Default)]
+    struct CollectSink {
+        events: std::sync::Arc<std::sync::Mutex<Vec<AgentEvent>>>,
+    }
+
+    impl CollectSink {
+        fn events(&self) -> Vec<AgentEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventSink for CollectSink {
+        async fn emit(&self, event: AgentEvent) -> Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_left_open_at_stream_end_is_emitted_before_done() {
+        // OpenAI never marks an individual call finished, so end-of-stream
+        // flush is the only thing that completes one. A call emitted after
+        // Done (or never flushed at all) is lost.
+        let collect = CollectSink::default();
+        let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
+        let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(
+            b"data: start\ndata: args\n",
+        ))]);
+        let parse = |data: &str| -> Vec<SseItem> {
+            match data {
+                "start" => vec![SseItem::ToolCallStart {
+                    index: 0,
+                    id: "c1".into(),
+                    name: "search".into(),
+                }],
+                "args" => vec![SseItem::ToolCallArgs {
+                    index: 0,
+                    json: "{\"q\":1}".into(),
+                }],
+                _ => vec![],
+            }
+        };
+        stream_items(chunks, &sink, parse).await.unwrap();
+
+        let events = collect.events();
+        let call_at = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ToolCall(_)))
+            .expect("the open tool call must be emitted at end of stream");
+        let done_at = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Done(_)))
+            .expect("Done must be emitted");
+        assert!(
+            call_at < done_at,
+            "the flushed tool call must precede Done; got call at {call_at}, done at {done_at}"
+        );
     }
 
     #[tokio::test]
