@@ -181,6 +181,16 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
         Entry::Block(ContentBlock::Image(i)) => Some(serde_json::json!({
             "inlineData": { "mimeType": i.mime_type, "data": i.data },
         })),
+        // Gemini takes a PDF through the *same* `inlineData` shape as an
+        // image — only the media type differs. Confirmed against the live API
+        // rather than assumed, since the issue flagged it as expected-but-
+        // unverified.
+        Entry::Block(b @ ContentBlock::Resource(_)) => {
+            let (mime, data) = crate::binary_block(b)?;
+            Some(serde_json::json!({
+                "inlineData": { "mimeType": mime, "data": data },
+            }))
+        }
         Entry::Block(_) => None,
         Entry::ToolCall(ToolInvocation {
             name,
@@ -215,6 +225,15 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
             }))
         }
     }
+}
+
+/// What Gemini can encode from a `Resource` blob through `inlineData`. Gemini
+/// also accepts audio and video inline, but nothing maps those yet, so
+/// claiming them here would refuse nothing and promise something untrue.
+fn unsupported_content(turns: &[Turn]) -> Option<String> {
+    crate::unsupported_resource(turns, |mime| {
+        mime.starts_with("image/") || mime == "application/pdf"
+    })
 }
 
 /// A turn's `parts` array: the single merged `{ "text": .. }` part Gemini
@@ -462,6 +481,9 @@ impl Agent for GeminiAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
+        if let Some(why) = unsupported_content(&ctx.turns) {
+            return Err(manch_protocol::Error::Unsupported(format!("gemini: {why}")));
+        }
         let resp = self
             .http
             .send(
@@ -1023,5 +1045,35 @@ mod tests {
     fn no_system_turn_means_no_system_instruction_key() {
         let body = request_body(&[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert!(body.get("systemInstruction").is_none());
+    }
+
+    /// A `Resource` block carrying binary data — how a PDF reaches a provider.
+    fn doc(mime: Option<&str>, data: &str) -> Entry {
+        use manch_protocol::acp::{
+            BlobResourceContents, EmbeddedResource, EmbeddedResourceResource,
+        };
+        Entry::Block(ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new(data, "file:///case/exhibit-a.pdf")
+                    .mime_type(mime.map(str::to_string)),
+            ),
+        )))
+    }
+
+    #[test]
+    fn a_pdf_resource_becomes_a_gemini_inline_data_part() {
+        // Verified live on 2026-09-04: Gemini reads a PDF sent this way — the
+        // issue flagged this as "expected, confirm before relying on it".
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![doc(Some("application/pdf"), "JVBERi0=")],
+        };
+        let body = request_body(&[turn], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(
+            body["contents"][0]["parts"][0],
+            serde_json::json!({
+                "inlineData": { "mimeType": "application/pdf", "data": "JVBERi0=" }
+            })
+        );
     }
 }

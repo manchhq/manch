@@ -193,6 +193,17 @@ fn tool_result_text(content: &[ToolCallContent]) -> String {
         .join("\n")
 }
 
+/// Chat Completions has no part type that carries a document.
+///
+/// Verified against a live OpenAI-compatible endpoint: a PDF data URI is
+/// rejected, and OpenAI's newer `file` part is rejected by the validator
+/// outright. The provider's own error blames the data URI *scheme* — which is
+/// wrong, since a PNG data URI succeeds on the same endpoint and model — so
+/// that claim is deliberately not repeated to the host.
+fn unsupported_content(turns: &[Turn]) -> Option<String> {
+    crate::unsupported_resource(turns, |mime| mime.starts_with("image/"))
+}
+
 /// A turn's `content` value: the bare string OpenAI has always been sent when
 /// every content block is text, or an array of typed parts once the turn
 /// carries a non-text block.
@@ -222,10 +233,15 @@ fn turn_content(turn: &Turn) -> serde_json::Value {
                 }
                 // Chat Completions takes an image as a URL, and a data URL is
                 // how base64 bytes become one.
-                Entry::Block(ContentBlock::Image(i)) => Some(serde_json::json!({
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:{};base64,{}", i.mime_type, i.data) },
-                })),
+                Entry::Block(b @ (ContentBlock::Image(_) | ContentBlock::Resource(_))) => {
+                    let (mime, data) = crate::binary_block(b)?;
+                    // Non-image resources never reach here — `unsupported_content`
+                    // refuses the turn before the body is built.
+                    Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{mime};base64,{data}") },
+                    }))
+                }
                 _ => None,
             })
             .collect(),
@@ -535,6 +551,13 @@ impl Agent for OpenAiAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
+        if let Some(why) = unsupported_content(&ctx.turns) {
+            return Err(manch_protocol::Error::Unsupported(format!(
+                "{}: {why}. Chat Completions carries images only — rasterise the \
+                 document into page images, or use a provider that takes documents.",
+                self.id
+            )));
+        }
         let resp = self
             .http
             .send(
@@ -1032,5 +1055,64 @@ mod tests {
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "be careful");
         assert_eq!(msgs[1]["role"], "user");
+    }
+
+    /// A `Resource` block carrying binary data — how a PDF reaches a provider.
+    fn doc(mime: Option<&str>, data: &str) -> Entry {
+        use manch_protocol::acp::{
+            BlobResourceContents, EmbeddedResource, EmbeddedResourceResource,
+        };
+        Entry::Block(ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new(data, "file:///case/exhibit-a.pdf")
+                    .mime_type(mime.map(str::to_string)),
+            ),
+        )))
+    }
+
+    #[test]
+    fn a_pdf_is_refused_explicitly_rather_than_dropped() {
+        // Chat Completions has no part type that carries a PDF. Verified live:
+        // a PDF data URI is rejected, and the `file` part shape is rejected by
+        // the validator outright. Dropping it silently is the #53 bug.
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![doc(Some("application/pdf"), "JVBERi0=")],
+        };
+        let refusal = unsupported_content(&[turn]).expect("a PDF must be refused");
+        assert!(refusal.contains("application/pdf"), "got {refusal}");
+        // The provider's own error blames the data URI scheme, which is wrong —
+        // a PNG data URI works on the same endpoint and model. Repeating that
+        // claim would send a host chasing the wrong fix.
+        assert!(
+            !refusal.contains("scheme"),
+            "must not blame the data URI scheme; got {refusal}"
+        );
+    }
+
+    #[test]
+    fn an_image_resource_blob_is_still_carried() {
+        // Only non-image blobs are refused: an image is representable here.
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![doc(Some("image/png"), "AAAA")],
+        };
+        assert!(unsupported_content(std::slice::from_ref(&turn)).is_none());
+        let body = request_body(
+            "gpt-5-chat-latest",
+            &[turn],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn ordinary_text_is_never_refused() {
+        assert!(unsupported_content(&[u("hi")]).is_none());
     }
 }

@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use manch_llm::{AnthropicAgent, GeminiAgent, OpenAiAgent};
 use manch_protocol::acp::{
-    Content, ContentBlock, ImageContent, SessionUpdate, StopReason, TextContent, ToolCallContent,
-    ToolKind,
+    BlobResourceContents, Content, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
+    ImageContent, SessionUpdate, StopReason, TextContent, ToolCallContent, ToolKind,
 };
 use manch_protocol::{
     Agent, AgentEvent, Context, Entry, EventSink, Result, Role, ToolSchema, Turn,
@@ -668,5 +668,85 @@ async fn gemini_obeys_a_system_turn_over_the_users_question() {
     assert!(
         !text.contains("PARIS"),
         "the model answered the question instead of obeying the system turn: {text:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Documents: a PDF has to survive the trip, on the providers that take one.
+//
+// The issue this closes recorded Gemini's PDF support as "expected via
+// inline_data — confirm before relying on it". This is that confirmation, and
+// it is exactly the class of claim a unit test cannot make: the request is
+// well-formed either way, and a provider that ignores an unrecognised part
+// returns a cheerful 200 describing nothing.
+// ---------------------------------------------------------------------------
+
+/// A 543-byte one-page PDF whose only content is the word MANGO. Inline so the
+/// fixture cannot drift, and a nonsense word so a model cannot infer it.
+const MANGO_PDF_B64: &str = "JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCAyMDAgMTAwXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4KZW5kb2JqCjQgMCBvYmoKPDwvTGVuZ3RoIDM2Pj4Kc3RyZWFtCkJUIC9GMSAyNCBUZiAyMCA0MCBUZCAoTUFOR08pIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTQgMDAwMDAgbiAKMDAwMDAwMDEwNSAwMDAwMCBuIAowMDAwMDAwMjE3IDAwMDAwIG4gCjAwMDAwMDAzMDAgMDAwMDAgbiAKdHJhaWxlcgo8PC9TaXplIDYvUm9vdCAxIDAgUj4+CnN0YXJ0eHJlZgozNjMKJSVFT0YK";
+
+fn ask_about_the_document(prompt: &str, mime: &str) -> Context {
+    Context {
+        session_id: "live-document".to_string(),
+        turns: vec![Turn {
+            role: Role::User,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new(prompt.to_string()))),
+                Entry::Block(ContentBlock::Resource(EmbeddedResource::new(
+                    EmbeddedResourceResource::BlobResourceContents(
+                        BlobResourceContents::new(MANGO_PDF_B64, "file:///exhibit-a.pdf")
+                            .mime_type(mime.to_string()),
+                    ),
+                ))),
+            ],
+        }],
+    }
+}
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_reads_a_pdf_sent_as_a_resource_blob() {
+    let sink = Arc::new(Collector::default());
+    GeminiAgent::new(key("GEMINI_API_KEY"), None)
+        .prompt(
+            ask_about_the_document(
+                "What single word appears in this document? Reply with only that word.",
+                "application/pdf",
+            ),
+            &[],
+            sink.clone(),
+        )
+        .await
+        .expect("gemini: prompt failed");
+
+    let text = sink.text().to_uppercase();
+    assert!(
+        text.contains("MANGO"),
+        "the PDF did not reach the model, or was not read — got {text:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live: needs FIREWORKS_API_KEY"]
+async fn an_openai_compatible_provider_refuses_a_pdf_rather_than_dropping_it() {
+    // The other half of the same guarantee. This one needs no network at all to
+    // fail correctly — the refusal happens before the request — but it is here
+    // beside its counterpart so the asymmetry is visible in one place.
+    let err = manch_llm::fireworks::agent(key("FIREWORKS_API_KEY"), None)
+        .prompt(
+            ask_about_the_document("What word is in this document?", "application/pdf"),
+            &[],
+            Arc::new(Collector::default()),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, manch_protocol::Error::Unsupported(_)),
+        "a document must be refused distinguishably, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("scheme"),
+        "must not repeat the provider's misleading data-URI-scheme claim: {err}"
     );
 }
