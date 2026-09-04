@@ -27,6 +27,9 @@ pub use openai::OpenAiAgent;
 #[cfg(feature = "fireworks")]
 pub mod fireworks;
 
+mod http;
+pub use http::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_RETRIES, DEFAULT_READ_TIMEOUT};
+
 /// What a model is *for*. Derived from whatever the provider publishes, so it
 /// is deliberately coarse: the question it answers is "would offering this in a
 /// chat picker be a mistake", not "what family is this".

@@ -8,10 +8,7 @@ use manch_protocol::{
     Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
 };
 
-use crate::{
-    ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, nested_token_count, token_count,
-    turn_text,
-};
+use crate::{ModelInfo, ModelKind, SseItem, nested_token_count, token_count, turn_text};
 
 pub(crate) const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 // Stable chat alias — resolves to the current GPT-5 chat snapshot and works with
@@ -28,6 +25,7 @@ pub struct OpenAiAgent {
     /// Fireworks is OpenAI.
     id: &'static str,
     max_output_tokens: u32,
+    http: crate::http::Http,
 }
 
 impl OpenAiAgent {
@@ -38,7 +36,32 @@ impl OpenAiAgent {
             base: crate::resolve_base("openai", None, DEFAULT_BASE),
             id: "openai",
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            http: crate::http::Http::default(),
         }
+    }
+    /// Time allowed to establish a connection. See
+    /// [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT).
+    #[must_use]
+    pub fn connect_timeout(mut self, d: std::time::Duration) -> Self {
+        self.http = self.http.with_connect_timeout(d);
+        self
+    }
+
+    /// Maximum time between two reads on a live response — a stall detector,
+    /// not a deadline for the turn. See
+    /// [`DEFAULT_READ_TIMEOUT`](crate::DEFAULT_READ_TIMEOUT).
+    #[must_use]
+    pub fn read_timeout(mut self, d: std::time::Duration) -> Self {
+        self.http = self.http.with_read_timeout(d);
+        self
+    }
+
+    /// Retries after the first attempt, on 429 and 5xx. `0` disables retrying.
+    /// See [`DEFAULT_MAX_RETRIES`](crate::DEFAULT_MAX_RETRIES).
+    #[must_use]
+    pub fn max_retries(mut self, n: u32) -> Self {
+        self.http = self.http.with_max_retries(n);
+        self
     }
 
     /// Cap the model's output, in tokens. Defaults to
@@ -82,6 +105,7 @@ impl OpenAiAgent {
             base: crate::resolve_base(env_key, None, default_base),
             id,
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            http: crate::http::Http::default(),
         }
     }
 
@@ -474,9 +498,9 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
 /// As [`list_models`], against an explicit base (falling back to the env
 /// override, then the vendor default).
 pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
-    ensure_crypto_provider();
     let base = crate::resolve_base("openai", base, DEFAULT_BASE);
-    let resp = reqwest::Client::new()
+    let resp = crate::http::shared()
+        .client()
         .get(models_url(&base))
         .bearer_auth(api_key)
         .send()
@@ -496,20 +520,22 @@ impl Agent for OpenAiAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
-        ensure_crypto_provider();
-        let resp = reqwest::Client::new()
-            .post(completions_url(&self.base))
-            .bearer_auth(&self.api_key)
-            .json(&request_body(
-                &self.model,
-                &ctx.turns,
-                tools,
-                self.max_output_tokens,
-                self.id,
-            ))
-            .send()
-            .await
-            .map_err(err)?;
+        let resp = self
+            .http
+            .send(
+                self.http
+                    .client()
+                    .post(completions_url(&self.base))
+                    .bearer_auth(&self.api_key)
+                    .json(&request_body(
+                        &self.model,
+                        &ctx.turns,
+                        tools,
+                        self.max_output_tokens,
+                        self.id,
+                    )),
+            )
+            .await?;
 
         if !resp.status().is_success() {
             return Err(crate::http_error("openai", resp).await);

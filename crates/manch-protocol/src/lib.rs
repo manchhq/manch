@@ -85,7 +85,13 @@ pub use permission::{
 pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
+///
+/// `#[non_exhaustive]` for the same reason as [`AgentEvent`]: this set grows as
+/// Manch learns to tell failures apart — `Timeout` was split out of `Other`
+/// exactly that way — and each addition should be a minor bump rather than a
+/// coordinated migration for every host that matches on it.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A requested agent / tool / channel id was not registered.
     #[error("not found: {0}")]
@@ -93,6 +99,12 @@ pub enum Error {
     /// A tool received arguments it could not parse or validate.
     #[error("invalid tool arguments: {0}")]
     InvalidArguments(String),
+    /// A provider accepted the connection and then stalled past the configured
+    /// deadline. Distinct from [`Error::Other`] on purpose: "the network
+    /// stalled" and "the model refused" want different handling from a host,
+    /// and a retry is only sensible for one of them.
+    #[error("timeout: {0}")]
+    Timeout(String),
     /// The underlying agent, transport, or store failed.
     #[error("{0}")]
     Other(String),
