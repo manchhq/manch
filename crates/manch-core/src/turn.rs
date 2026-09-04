@@ -318,19 +318,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_tool_is_not_found() {
-        let agent = ScriptAgent::new("a", vec![vec![tool_call("ghost")]]);
+    async fn an_unknown_tool_name_is_fed_back_so_the_model_can_correct_itself() {
+        // Replaces `unknown_tool_is_not_found`, which pinned the opposite.
+        // Naming a tool that was never offered is something models do, and it
+        // is recoverable: told which tools exist, the model can reissue. Ending
+        // the turn denies it that, exactly as a failing tool used to (#38).
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![tool_call("ghost")],
+                vec![
+                    AgentEvent::text_chunk("using the real one"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(agent))
+            .tool(Arc::new(EchoTool::new(
+                "echo",
+                Tier::Read,
+                Arc::new(Mutex::new(Vec::new())),
+            )))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+
+        manch
+            .handle(
+                "a",
+                "s",
+                user_msg("hi"),
+                ext(),
+                Arc::new(CollectSink::new()),
+            )
+            .await
+            .expect("an unknown tool name must not end the turn");
+
+        let text = first_tool_result_text(&store.entries());
+        assert!(
+            text.contains("ghost"),
+            "the model must be told which name it got wrong; got {text:?}"
+        );
+        assert!(
+            text.contains("echo"),
+            "and which tools it may actually call; got {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_cannot_decide_still_ends_the_turn() {
+        // The line drawn in #38 and extended here: a failure is answered when
+        // there is a call to answer *and* the model can act on it. A policy
+        // that errors is neither — there is no honest result to record, and
+        // pretending otherwise would let a Draft tool past an undecided gate.
+        use crate::testing::FailPolicy;
+        let agent = ScriptAgent::new("a", vec![vec![tool_call("echo")]]);
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(EchoTool::new(
+                "echo",
+                Tier::Draft,
+                Arc::new(Mutex::new(Vec::new())),
+            )))
+            .permission_policy(Arc::new(FailPolicy))
             .memory(Arc::new(MemStore::new()))
             .build()
             .unwrap();
-        let sink = Arc::new(CollectSink::new());
         let err = manch
-            .handle("a", "s", user_msg("hi"), ext(), sink)
+            .handle(
+                "a",
+                "s",
+                user_msg("hi"),
+                ext(),
+                Arc::new(CollectSink::new()),
+            )
             .await
             .unwrap_err();
-        assert!(matches!(err, Error::NotFound(name) if name == "ghost"));
+        assert!(matches!(err, Error::Other(m) if m.contains("policy unavailable")));
     }
 
     /// The text of the first persisted `ToolResult` — what the model is

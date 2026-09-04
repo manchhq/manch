@@ -154,6 +154,11 @@ async fn assert_tool_is_offered_and_called(agent: impl Agent, provider: &str) {
     // rather than only in error text, `Manch::tool_for` cannot resolve it —
     // the registry is keyed on `schema().name`. This assertion is where that
     // would surface.
+    //
+    // It matters more since an unresolvable name became non-fatal: the model is
+    // now told "no such tool" and invited to retry, but a provider-injected
+    // prefix is not something it can correct, so it would burn the whole step
+    // budget and fail at the cap instead of erroring on the first call.
     assert_eq!(
         call.name, "get_current_weather",
         "{provider}: tool name did not round-trip. A namespace prefix here (e.g. \

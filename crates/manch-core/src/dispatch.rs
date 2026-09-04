@@ -293,6 +293,24 @@ impl Manch {
             .ok_or_else(|| Error::NotFound(inv.name.clone()))
     }
 
+    /// What to tell a model that named a tool which is not registered.
+    ///
+    /// Names the wrong name *and* the real ones: "unknown tool" alone leaves
+    /// the model guessing, and it will usually guess the same way twice. Sorted
+    /// so the sentence is stable across runs rather than following `HashMap`
+    /// iteration order.
+    fn unknown_tool_reason(&self, name: &str) -> String {
+        let mut available: Vec<&str> = self.tools.keys().map(String::as_str).collect();
+        available.sort_unstable();
+        if available.is_empty() {
+            return format!("there is no tool named '{name}'; no tools are registered.");
+        }
+        format!(
+            "there is no tool named '{name}'. Available tools: {}.",
+            available.join(", ")
+        )
+    }
+
     /// Run one batch of invocations in order, buffering their results.
     ///
     /// Returns without flushing on error — the caller drops the buffer, so a
@@ -306,7 +324,27 @@ impl Manch {
         buf: &mut Buffer,
     ) -> Result<Batch> {
         for inv in calls {
-            let tool = self.tool_for(&inv)?;
+            // A name that was never offered is something models do, and it is
+            // recoverable — told what exists, the model can reissue. Answering
+            // it is the same call as answering a failed tool (#38): there *is*
+            // a call to answer, and the model is the one that can fix it.
+            //
+            // `Manch::approve` still treats this as an error, and should: there
+            // the invocation was already resolved once, so failing on resume
+            // means the registry changed underneath a pending approval.
+            let Ok(tool) = self.tool_for(&inv) else {
+                let content = failure(&self.unknown_tool_reason(&inv.name));
+                report(
+                    sink,
+                    &inv,
+                    acp::ToolKind::default(),
+                    acp::ToolCallStatus::Failed,
+                    Some(vec![content.clone()]),
+                )
+                .await?;
+                buf.record(&inv, vec![content]);
+                continue;
+            };
             let cx = ToolContext::new(session_id, &inv.id, ext.clone());
             // Checked before the tier split on purpose: a `Draft` call whose
             // arguments are unreadable must not reach a human either. Asking
@@ -727,17 +765,17 @@ mod tests {
         // error the turn cannot answer, the whole batch is discarded so no
         // `tool_use` is persisted without its `tool_result`.
         //
-        // The vehicle changed, though. This used to use a *failing tool*, which
-        // no longer errors — a tool failure is now answered and fed back (#38).
-        // An unregistered tool name still errors, because the model named
-        // something that was never offered and there is no call to answer.
+        // The vehicle has moved twice. A *failing tool* no longer errors, and
+        // neither does an *unregistered name* — both are answered and fed back
+        // now. What is left is a host fault the model cannot act on: a policy
+        // that cannot decide. There is no honest result to record for it.
         let store = Arc::new(MemStore::new());
         let m = Manch::builder()
             .agent(Arc::new(ScriptAgent::new(
                 "a",
                 vec![vec![
                     tool_call("c1", "list_appointments", json!({})),
-                    tool_call("c2", "ghost", json!({})),
+                    tool_call("c2", "book", json!({})),
                 ]],
             )))
             .tool(Arc::new(EchoTool::new(
@@ -745,6 +783,12 @@ mod tests {
                 Tier::Read,
                 Arc::new(Mutex::new(Vec::new())),
             )))
+            .tool(Arc::new(EchoTool::new(
+                "book",
+                Tier::Draft,
+                Arc::new(Mutex::new(Vec::new())),
+            )))
+            .permission_policy(Arc::new(crate::testing::FailPolicy))
             .memory(store.clone())
             .build()
             .unwrap();
@@ -753,7 +797,7 @@ mod tests {
             .handle("a", "s", user_msg("go"), ext(), sink())
             .await
             .unwrap_err();
-        assert!(matches!(err, manch_protocol::Error::NotFound(n) if n == "ghost"));
+        assert!(matches!(err, manch_protocol::Error::Other(m) if m.contains("policy unavailable")));
 
         let ctx = store.assemble_context("s").await.unwrap();
         assert!(
