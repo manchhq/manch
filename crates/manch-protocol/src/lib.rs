@@ -140,6 +140,7 @@ pub struct Usage {
 /// match, so the variance costs nothing but the enum's own stack slot.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AgentEvent {
     /// A streamed update in ACP's own vocabulary (content chunk, tool-call
     /// status, plan, …). Forwarded verbatim to the originating [`Channel`]/UI.

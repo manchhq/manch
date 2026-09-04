@@ -80,9 +80,23 @@ pub fn map_event(event: AgentEvent) -> Option<StreamEvent> {
             detail: None,
         }),
         // Spend display is not built yet — dropped deliberately, not by
-        // omission. Explicit (not a catch-all) so a future `AgentEvent`
-        // variant fails to compile here instead of being silently dropped.
+        // omission.
         AgentEvent::Usage(_) => None,
+        // `AgentEvent` is `#[non_exhaustive]`, so this arm is now required and
+        // the compile-time guarantee the arms above used to provide is gone.
+        //
+        // There is no honest generic mapping from an unknown event to a
+        // `StreamEvent`, so an unrecognised variant is dropped. That is the
+        // real cost of the attribute, and it lands in the UI layer where a
+        // dropped event looks like nothing happening. A dev build says so on
+        // stderr instead, which is the closest thing left to the old guarantee.
+        #[allow(unreachable_patterns)]
+        other => {
+            #[cfg(debug_assertions)]
+            eprintln!("[agent] unmapped AgentEvent variant dropped: {other:?}");
+            let _ = &other;
+            None
+        }
     }
 }
 
@@ -189,5 +203,23 @@ mod tests {
             }
             other => panic!("expected a Tool event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_events_are_not_surfaced_to_the_ui() {
+        // Regression guard, not a RED test. `AgentEvent` is now
+        // `#[non_exhaustive]`, so dropping `Usage` sits next to a wildcard that
+        // also drops. This pins the deliberate decision so it stays
+        // distinguishable from the accidental one: if spend display is ever
+        // built, this test is what fails and says where to look.
+        use manch_protocol::Usage;
+
+        assert_eq!(
+            map_event(AgentEvent::Usage(Usage {
+                input_tokens: Some(12),
+                output_tokens: Some(4),
+            })),
+            None
+        );
     }
 }
