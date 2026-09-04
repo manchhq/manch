@@ -137,6 +137,25 @@ impl EventSink for CollectSink {
     }
 }
 
+/// A `PermissionPolicy` whose `decide` always errors — a vehicle for the
+/// failures that still end a turn now that tool errors and unknown tool names
+/// are answered instead (#38). A policy that cannot decide is a host fault:
+/// there is no honest result to hand the model.
+pub struct FailPolicy;
+
+#[async_trait]
+impl manch_protocol::PermissionPolicy for FailPolicy {
+    async fn decide(
+        &self,
+        _cx: &ToolContext,
+        _inv: &manch_protocol::ToolInvocation,
+    ) -> Result<manch_protocol::PermissionDecision> {
+        Err(manch_protocol::Error::Other(
+            "policy unavailable".to_string(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod smoke {
     use super::*;
