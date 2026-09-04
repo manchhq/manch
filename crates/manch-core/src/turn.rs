@@ -83,7 +83,7 @@ mod tests {
     use manch_protocol::acp::{ContentBlock, StopReason, TextContent};
     use manch_protocol::{
         AgentEvent, Entry, Error, EventSink, Extensions, MemoryStore, Role, Tier, Tool,
-        ToolInvocation, TurnOutcome, Usage,
+        ToolInvocation, TurnOutcome, Usage, acp,
     };
 
     use crate::Manch;
@@ -333,12 +333,137 @@ mod tests {
         assert!(matches!(err, Error::NotFound(name) if name == "ghost"));
     }
 
+    /// The text of the first persisted `ToolResult` — what the model is
+    /// actually told about a call that did not succeed.
+    fn first_tool_result_text(entries: &[(Role, Entry)]) -> String {
+        entries
+            .iter()
+            .find_map(|(_, e)| match e {
+                Entry::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("a tool result must be persisted")
+            .iter()
+            .filter_map(|c| match c {
+                acp::ToolCallContent::Content(inner) => match &inner.content {
+                    ContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[tokio::test]
-    async fn failing_tool_propagates_and_stops() {
+    async fn a_failing_tool_is_reported_back_to_the_model_instead_of_ending_the_turn() {
+        // Replaces `failing_tool_propagates_and_stops`, which pinned the
+        // opposite behaviour. A tool that errors is not a host bug — it is
+        // information the model can act on, exactly like the refusal a rejected
+        // permission already records. Ending the turn instead denies it the
+        // chance to retry or explain, which is #38.
         use crate::testing::FailTool;
-        let agent = ScriptAgent::new("a", vec![vec![tool_call("boom")]]);
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![tool_call("boom")],
+                vec![
+                    AgentEvent::text_chunk("could not do that"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(MemStore::new());
         let manch = Manch::builder()
             .agent(Arc::new(agent))
+            .tool(Arc::new(FailTool::new("boom")))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+
+        let stop = manch
+            .handle("a", "s", user_msg("hi"), ext(), sink.clone())
+            .await
+            .expect("a failing tool must not end the turn");
+        assert_eq!(stop, TurnOutcome::Finished(StopReason::EndTurn));
+
+        let entries = store.entries();
+        let text = first_tool_result_text(&entries);
+        assert!(
+            text.contains("failed"),
+            "the model must be told the call failed; got {text:?}"
+        );
+
+        // The UI still learns the call failed — the signal is not swallowed,
+        // it is redirected.
+        assert!(
+            sink.events().iter().any(|e| matches!(
+                e,
+                AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(u))
+                    if u.fields.status == Some(acp::ToolCallStatus::Failed)
+            )),
+            "the sink must still report the call as Failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_arguments_never_reach_the_tool_and_are_fed_back() {
+        // `manch-llm` degrades an unparsable streamed argument accumulation to
+        // `Value::Null` — deliberately, because `{}` is valid arguments for a
+        // zero-argument tool and would let a garbled call execute. `Null` is
+        // therefore a sentinel no model can send, and the call must be answered
+        // rather than run.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let garbled = AgentEvent::ToolCall(ToolInvocation {
+            id: "call-garbled".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::Value::Null,
+            provider_meta: None,
+        });
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![garbled],
+                vec![
+                    AgentEvent::text_chunk("retrying"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(MemStore::new());
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(EchoTool::new("echo", Tier::Read, log.clone())))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+
+        manch
+            .handle("a", "s", user_msg("hi"), ext(), sink)
+            .await
+            .expect("unreadable arguments must not end the turn");
+
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "the tool must never be called with arguments that failed to parse"
+        );
+        let text = first_tool_result_text(&store.entries());
+        assert!(
+            text.contains("arguments"),
+            "the model must be told its arguments were unreadable; got {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_always_fails_still_terminates_at_the_iteration_cap() {
+        // Feeding failures back makes them non-terminal, so the only thing left
+        // bounding a model that retries forever is the step cap. Pin it.
+        use crate::testing::FailTool;
+        let turns: Vec<Vec<AgentEvent>> = (0..32).map(|_| vec![tool_call("boom")]).collect();
+        let manch = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new("a", turns)))
             .tool(Arc::new(FailTool::new("boom")))
             .memory(Arc::new(MemStore::new()))
             .build()
@@ -348,7 +473,7 @@ mod tests {
             .handle("a", "s", user_msg("hi"), ext(), sink)
             .await
             .unwrap_err();
-        assert!(matches!(err, Error::Other(_)));
+        assert!(matches!(err, Error::Other(msg) if msg.contains("exceeded")));
     }
 
     #[tokio::test]
