@@ -193,6 +193,23 @@ fn entry_json(entry: &Entry) -> Option<serde_json::Value> {
                 "data": i.data,
             },
         })),
+        // ACP has no document variant, so a PDF arrives as a `Resource`
+        // holding a blob. Anthropic takes it whole — no rasterising, and this
+        // is the block that can carry page-anchored citations.
+        Entry::Block(b @ ContentBlock::Resource(_)) => {
+            let (mime, data) = crate::binary_block(b)?;
+            Some(if mime.starts_with("image/") {
+                serde_json::json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": mime, "data": data },
+                })
+            } else {
+                serde_json::json!({
+                    "type": "document",
+                    "source": { "type": "base64", "media_type": mime, "data": data },
+                })
+            })
+        }
         Entry::Block(_) => None,
         Entry::ToolCall(ToolInvocation {
             id,
@@ -225,6 +242,14 @@ fn turn_content(turn: &Turn) -> serde_json::Value {
         return serde_json::Value::String(turn_text(turn));
     }
     serde_json::Value::Array(turn.entries.iter().filter_map(entry_json).collect())
+}
+
+/// What Anthropic's Messages API can encode from a `Resource` blob: images,
+/// and the two document media types its `document` block accepts.
+fn unsupported_content(turns: &[Turn]) -> Option<String> {
+    crate::unsupported_resource(turns, |mime| {
+        mime.starts_with("image/") || mime == "application/pdf" || mime == "text/plain"
+    })
 }
 
 /// Anthropic's top-level `system` parameter: the text of every `Role::System`
@@ -461,6 +486,11 @@ impl Agent for AnthropicAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
+        if let Some(why) = unsupported_content(&ctx.turns) {
+            return Err(manch_protocol::Error::Unsupported(format!(
+                "anthropic: {why}"
+            )));
+        }
         let resp = self
             .http
             .send(
@@ -937,5 +967,78 @@ mod tests {
             true,
         );
         assert!(body.get("system").is_none());
+    }
+
+    /// A `Resource` block carrying binary data — how a PDF reaches a provider.
+    fn doc(mime: Option<&str>, data: &str) -> Entry {
+        use manch_protocol::acp::{
+            BlobResourceContents, EmbeddedResource, EmbeddedResourceResource,
+        };
+        Entry::Block(ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::BlobResourceContents(
+                BlobResourceContents::new(data, "file:///case/exhibit-a.pdf")
+                    .mime_type(mime.map(str::to_string)),
+            ),
+        )))
+    }
+
+    #[test]
+    fn a_pdf_resource_becomes_an_anthropic_document_block() {
+        // Anthropic takes a PDF whole, so a host never has to rasterise — and
+        // this is the path that can carry page-anchored citations.
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new(
+                    "read this".to_string(),
+                ))),
+                doc(Some("application/pdf"), "JVBERi0="),
+            ],
+        };
+        let body = request_body(
+            "claude-opus-4-8",
+            &[turn],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
+        );
+        assert_eq!(
+            body["messages"][0]["content"][1],
+            serde_json::json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERi0=",
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_blob_with_no_media_type_is_refused_rather_than_guessed_at() {
+        // `mime_type` is `Option` in ACP, and inventing one would send a PDF as
+        // whatever we assumed and fail somewhere far less legible.
+        //
+        // Written first as "…is dropped", which was wrong on its own terms:
+        // dropping is exactly the silent loss #53 exists to stop. The fix is in
+        // the host's hands — declare the media type — so it must be told.
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![doc(None, "JVBERi0=")],
+        };
+        let why = unsupported_content(&[turn]).expect("an undeclared blob must be refused");
+        assert!(why.contains("no declared media type"), "got {why}");
+    }
+
+    #[test]
+    fn a_pdf_is_accepted_here_even_though_openai_refuses_it() {
+        // The asymmetry is the point: the same turn is carried by one provider
+        // and refused by another, which is what makes the refusal actionable.
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![doc(Some("application/pdf"), "JVBERi0=")],
+        };
+        assert!(unsupported_content(&[turn]).is_none());
     }
 }

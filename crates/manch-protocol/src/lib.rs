@@ -64,7 +64,8 @@ use serde::{Deserialize, Serialize};
 /// does not define parallel content/event enums.
 pub mod acp {
     pub use agent_client_protocol::schema::v1::{
-        Content, ContentBlock, ContentChunk, ImageContent, PermissionOption, PermissionOptionId,
+        BlobResourceContents, Content, ContentBlock, ContentChunk, EmbeddedResource,
+        EmbeddedResourceResource, ImageContent, PermissionOption, PermissionOptionId,
         PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
         RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
         SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
@@ -105,6 +106,15 @@ pub enum Error {
     /// and a retry is only sensible for one of them.
     #[error("timeout: {0}")]
     Timeout(String),
+    /// The request carried content this provider cannot represent.
+    ///
+    /// Distinct from [`Error::Other`] so a host routing across providers can
+    /// act on it — rasterise a PDF into page images, or send it to a vendor
+    /// that takes documents — rather than parsing a message to find out.
+    /// Raised instead of dropping the content, because silently losing part of
+    /// a request is the failure this variant exists to make visible.
+    #[error("unsupported content: {0}")]
+    Unsupported(String),
     /// The underlying agent, transport, or store failed.
     #[error("{0}")]
     Other(String),

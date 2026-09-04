@@ -278,6 +278,58 @@ pub(crate) fn drain_sse(buf: &mut Vec<u8>, parse: impl Fn(&str) -> Vec<SseItem>)
     out
 }
 
+/// Bytes plus media type from a block that carries binary content: an
+/// `Image`, or a `Resource` holding a blob (which is how a PDF arrives —
+/// ACP has no document variant of its own).
+///
+/// `None` for text, for a `ResourceLink` (a URI whose bytes we do not hold),
+/// and for a blob with no declared media type. That last one is deliberately
+/// not guessed: sending a PDF as whatever we assumed fails somewhere far less
+/// legible than here.
+pub(crate) fn binary_block(block: &ContentBlock) -> Option<(&str, &str)> {
+    match block {
+        ContentBlock::Image(i) => Some((i.mime_type.as_str(), i.data.as_str())),
+        ContentBlock::Resource(r) => match &r.resource {
+            manch_protocol::acp::EmbeddedResourceResource::BlobResourceContents(b) => {
+                Some((b.mime_type.as_deref()?, b.blob.as_str()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The first `Resource` blob in `turns` that `accepts` cannot encode, as a
+/// message for [`manch_protocol::Error::Unsupported`].
+///
+/// Refused rather than dropped, and the line is deliberate: a document is
+/// carried by two of the three providers, so a host meeting this can act on it
+/// — rasterise into page images, or route to a vendor that takes PDFs. Losing
+/// it silently is the bug #53 was about.
+///
+/// `ContentBlock::Audio` is *not* checked here and remains a documented drop.
+/// Nothing maps it on any provider, so it is an unimplemented feature rather
+/// than a routing decision, and there is nothing for a host to do differently.
+pub(crate) fn unsupported_resource(turns: &[Turn], accepts: fn(&str) -> bool) -> Option<String> {
+    turns
+        .iter()
+        .flat_map(|t| &t.entries)
+        .filter_map(|e| match e {
+            Entry::Block(b @ ContentBlock::Resource(_)) => Some(b),
+            _ => None,
+        })
+        .find_map(|b| match binary_block(b) {
+            Some((mime, _)) if accepts(mime) => None,
+            Some((mime, _)) => Some(format!(
+                "this provider cannot carry a resource of type '{mime}'"
+            )),
+            None => Some(
+                "a resource was sent with no declared media type, so it cannot be encoded"
+                    .to_string(),
+            ),
+        })
+}
+
 /// Concatenate a turn's text blocks into one string. Non-text blocks and
 /// non-`Block` entries (a tool call is not prose) are ignored.
 ///
