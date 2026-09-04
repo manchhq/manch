@@ -125,10 +125,42 @@ pub struct Context {
 /// `message_delta`, Gemini repeats a running total per chunk, OpenAI sends one
 /// final block. Manch forwards what it is told and does not accumulate; a
 /// consumer that needs a running total sums the events it receives.
+///
+/// The field names are [ACP's own](https://agentclientprotocol.com) — its
+/// `Usage` carries exactly `total_tokens`, `input_tokens`, `output_tokens`,
+/// `thought_tokens`, `cached_read_tokens` and `cached_write_tokens` — so a host
+/// mapping between the two needs no translation table. ACP's type is not
+/// re-exported in its place because the two are delivered differently: ACP
+/// reports usage once, on `PromptResponse`, cumulative across the turn, and
+/// makes its three core counts required. Manch reports as it is told, several
+/// times per turn, so every field must be able to say "not yet". Forcing a
+/// required `u64` here would mean inventing zeros for counts that have not
+/// arrived, and a zero that means "unknown" is the failure this type exists to
+/// avoid.
+///
+/// Every field is `Option`, and the struct derives `Default`, so construct it
+/// as `Usage { input_tokens: .., ..Default::default() }` — a provider that
+/// learns to report one more count should not break the others.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    pub input_tokens: Option<u32>,
-    pub output_tokens: Option<u32>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    /// The provider's own total. **Not** `input + output`: on a thinking model
+    /// it also covers reasoning tokens, which are billed and are not in either
+    /// of the other two. A live Gemini turn reporting 21 in and 3 out returned
+    /// a total of 182 — the other 158 were thoughts. Summing the two visible
+    /// counts is how a spend display under-reports by an order of magnitude,
+    /// which is why this is carried rather than derived.
+    pub total_tokens: Option<u64>,
+    /// Reasoning/thinking tokens.
+    pub thought_tokens: Option<u64>,
+    /// Tokens served from a prompt cache — cheap, and the number a host watches
+    /// to see whether its caching is working at all.
+    pub cached_read_tokens: Option<u64>,
+    /// Tokens written *into* a prompt cache. Anthropic bills these at a premium
+    /// and is the only one of the three that reports them; the others cache
+    /// automatically and expose no write count.
+    pub cached_write_tokens: Option<u64>,
 }
 
 /// A streamed unit of progress from an [`Agent`] during a turn.

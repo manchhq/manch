@@ -218,6 +218,7 @@ mod tests {
             map_event(AgentEvent::Usage(Usage {
                 input_tokens: Some(12),
                 output_tokens: Some(4),
+                ..Default::default()
             })),
             None
         );

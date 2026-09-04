@@ -8,7 +8,10 @@ use manch_protocol::{
     Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
 };
 
-use crate::{ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, token_count, turn_text};
+use crate::{
+    ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, nested_token_count, token_count,
+    turn_text,
+};
 
 pub(crate) const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 // Stable chat alias — resolves to the current GPT-5 chat snapshot and works with
@@ -304,6 +307,13 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
         out.push(SseItem::Usage(manch_protocol::Usage {
             input_tokens: token_count(u, "prompt_tokens"),
             output_tokens: token_count(u, "completion_tokens"),
+            total_tokens: token_count(u, "total_tokens"),
+            // The only two counts any provider nests. Reading them off the top
+            // level silently yields `None` on every request.
+            thought_tokens: nested_token_count(u, "completion_tokens_details", "reasoning_tokens"),
+            cached_read_tokens: nested_token_count(u, "prompt_tokens_details", "cached_tokens"),
+            // Prompt caching is automatic here; nothing reports a write.
+            cached_write_tokens: None,
         }));
     }
     let delta = v
@@ -785,5 +795,24 @@ mod tests {
         assert_eq!(m.supports_tools, None);
         assert_eq!(m.context_window, None);
         assert_eq!(m.kind, Some(ModelKind::Chat));
+    }
+
+    #[test]
+    fn parse_line_reports_the_openai_cache_and_reasoning_breakdown() {
+        // Captured from a live OpenAI-dialect stream (Fireworks) on 2026-09-04.
+        // Both breakdowns are nested one level down, unlike every other count.
+        let d = r#"{"choices":[],"usage":{"prompt_tokens":90,"completion_tokens":23,"total_tokens":113,"prompt_tokens_details":{"cached_tokens":64},"completion_tokens_details":{"reasoning_tokens":7}}}"#;
+        let u = match parse_line(d).into_iter().find_map(|i| match i {
+            crate::SseItem::Usage(u) => Some(u),
+            _ => None,
+        }) {
+            Some(u) => u,
+            None => panic!("no usage item"),
+        };
+        assert_eq!(u.total_tokens, Some(113));
+        assert_eq!(u.cached_read_tokens, Some(64));
+        assert_eq!(u.thought_tokens, Some(7));
+        // OpenAI caches automatically; there is no write count to report.
+        assert_eq!(u.cached_write_tokens, None);
     }
 }

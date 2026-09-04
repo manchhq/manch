@@ -303,6 +303,13 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
         out.push(SseItem::Usage(manch_protocol::Usage {
             input_tokens: token_count(u, "promptTokenCount"),
             output_tokens: token_count(u, "candidatesTokenCount"),
+            // Gemini's own total, not a sum: on a thinking model it also covers
+            // `thoughtsTokenCount`, which appears in neither of the two above.
+            total_tokens: token_count(u, "totalTokenCount"),
+            thought_tokens: token_count(u, "thoughtsTokenCount"),
+            cached_read_tokens: token_count(u, "cachedContentTokenCount"),
+            // Gemini caches implicitly; there is no write count on the wire.
+            cached_write_tokens: None,
         }));
     }
     out
@@ -827,5 +834,57 @@ mod tests {
         let m = &parse_models(&body)[0];
         assert_eq!(m.context_window, None);
         assert_eq!(m.reasoning, None, "unknown must not read as `false`");
+    }
+
+    #[test]
+    fn parse_line_reports_thinking_and_total_tokens() {
+        // Captured from a live `streamGenerateContent` call on 2026-09-04.
+        // Note the total is NOT input + output: 21 + 3 = 24, but 158 thought
+        // tokens were also billed. A host summing the two visible counts would
+        // under-report this turn by 87%.
+        let d = r#"{"candidates":[{"content":{"parts":[{"text":"391"}]}}],"usageMetadata":{"promptTokenCount":21,"candidatesTokenCount":3,"totalTokenCount":182,"thoughtsTokenCount":158}}"#;
+        let u = match parse_line(d).into_iter().find_map(|i| match i {
+            crate::SseItem::Usage(u) => Some(u),
+            _ => None,
+        }) {
+            Some(u) => u,
+            None => panic!("no usage item"),
+        };
+        assert_eq!(u.input_tokens, Some(21));
+        assert_eq!(u.output_tokens, Some(3));
+        assert_eq!(u.total_tokens, Some(182));
+        assert_eq!(u.thought_tokens, Some(158));
+    }
+
+    #[test]
+    fn parse_line_reports_gemini_cached_tokens() {
+        let d = r#"{"usageMetadata":{"promptTokenCount":900,"candidatesTokenCount":10,"cachedContentTokenCount":850}}"#;
+        let u = match parse_line(d).into_iter().find_map(|i| match i {
+            crate::SseItem::Usage(u) => Some(u),
+            _ => None,
+        }) {
+            Some(u) => u,
+            None => panic!("no usage item"),
+        };
+        assert_eq!(u.cached_read_tokens, Some(850));
+        // Gemini caches implicitly and publishes no write count.
+        assert_eq!(u.cached_write_tokens, None);
+    }
+
+    #[test]
+    fn an_unreported_count_stays_unknown_rather_than_zero() {
+        // A non-thinking model sends no `thoughtsTokenCount`. Reporting 0 would
+        // claim it did no reasoning, which is a different fact from not saying.
+        let d = r#"{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7}}"#;
+        let u = match parse_line(d).into_iter().find_map(|i| match i {
+            crate::SseItem::Usage(u) => Some(u),
+            _ => None,
+        }) {
+            Some(u) => u,
+            None => panic!("no usage item"),
+        };
+        assert_eq!(u.thought_tokens, None);
+        assert_eq!(u.total_tokens, None);
+        assert_eq!(u.cached_read_tokens, None);
     }
 }

@@ -344,8 +344,17 @@ pub(crate) async fn http_error(provider: &str, resp: reqwest::Response) -> manch
 /// Read one token count out of a provider's usage object. Absent or non-numeric
 /// fields yield `None` rather than zero — "not reported" and "zero tokens" are
 /// different facts, and a consumer summing these must be able to tell them apart.
-pub(crate) fn token_count(usage: &serde_json::Value, key: &str) -> Option<u32> {
-    usage.get(key)?.as_u64().and_then(|n| u32::try_from(n).ok())
+pub(crate) fn token_count(usage: &serde_json::Value, key: &str) -> Option<u64> {
+    usage.get(key)?.as_u64()
+}
+
+/// Read a token count nested one level down, as the OpenAI dialect reports its
+/// cache and reasoning breakdowns (`prompt_tokens_details.cached_tokens`,
+/// `completion_tokens_details.reasoning_tokens`). Reading either off the top
+/// level yields a well-typed `None` on every request, which is why it has its
+/// own helper rather than an inline `get`.
+pub(crate) fn nested_token_count(usage: &serde_json::Value, outer: &str, key: &str) -> Option<u64> {
+    token_count(usage.get(outer)?, key)
 }
 
 /// Map one parsed SSE item to the event it emits. An `Error` item ends the turn
@@ -751,6 +760,8 @@ mod tests {
         let u = Usage {
             input_tokens: Some(10),
             output_tokens: Some(3),
+            thought_tokens: Some(42),
+            ..Default::default()
         };
         let ev = item_to_event(SseItem::Usage(u)).unwrap();
         assert!(matches!(ev, AgentEvent::Usage(got) if got == u));
