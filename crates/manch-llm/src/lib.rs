@@ -128,6 +128,44 @@ pub(crate) enum SseItem {
     ToolCallEnd {
         index: u32,
     },
+    /// The provider's own reason for ending the turn, translated into ACP's
+    /// vocabulary. Consumed by [`stream_items`] rather than becoming an event:
+    /// exactly one `AgentEvent::Done` is emitted per turn, and this decides
+    /// what it carries.
+    Stop(StopReason),
+}
+
+/// Output cap applied when a host sets none.
+///
+/// Roughly 6,000 words — enough for a drafted contract section or a long
+/// analysis, which the previous Anthropic-only constant of 1024 (~750 words)
+/// cut off mid-sentence. Chosen to be accepted by every current frontier model:
+/// Anthropic *requires* `max_tokens` and rejects a value above the model's
+/// ceiling, so the default has to clear the lowest ceiling in use rather than
+/// the highest.
+///
+/// A host that knows better should say so — [`ModelInfo::max_output_tokens`]
+/// carries the model's real ceiling where the provider publishes it (Gemini
+/// does), so the intended flow is to read it and pass it to the agent's
+/// `max_output_tokens` builder rather than to raise this constant.
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
+
+/// Translate a provider's own stop/finish reason into ACP's [`StopReason`].
+///
+/// The three dialects spell the same facts differently — Anthropic
+/// `"max_tokens"`, OpenAI `"length"`, Gemini `"MAX_TOKENS"` — and all three
+/// were previously discarded, so a truncated turn was indistinguishable from a
+/// complete one. Anything unrecognised reads as [`StopReason::EndTurn`]: a stop
+/// reason nobody understands is not evidence that something went wrong.
+pub(crate) fn stop_reason(raw: &str) -> StopReason {
+    match raw {
+        "max_tokens" | "length" | "MAX_TOKENS" => StopReason::MaxTokens,
+        // Anthropic reports a refusal outright; OpenAI and Gemini report the
+        // filter that produced it. ACP has one word for all of them.
+        "refusal" | "content_filter" | "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
+        | "IMAGE_SAFETY" => StopReason::Refusal,
+        _ => StopReason::EndTurn,
+    }
 }
 
 /// Assembles streamed tool-call fragments into complete [`AgentEvent::ToolCall`]s.
@@ -178,7 +216,7 @@ impl ToolAccum {
                     provider_meta,
                 }))
             }
-            SseItem::Text(_) | SseItem::Usage(_) | SseItem::Error(_) => None,
+            SseItem::Text(_) | SseItem::Usage(_) | SseItem::Error(_) | SseItem::Stop(_) => None,
         }
     }
 
@@ -365,6 +403,8 @@ pub(crate) fn item_to_event(item: SseItem) -> Result<AgentEvent> {
         SseItem::Text(t) => Ok(AgentEvent::text_chunk(t)),
         SseItem::Usage(u) => Ok(AgentEvent::Usage(u)),
         SseItem::Error(e) => Err(err(e)),
+        // `stream_items` intercepts this before it can reach here.
+        SseItem::Stop(_) => unreachable!("Stop is consumed by stream_items"),
         SseItem::ToolCallStart { .. }
         | SseItem::ToolCallArgs { .. }
         | SseItem::ToolCallEnd { .. } => {
@@ -397,6 +437,9 @@ where
 {
     let mut buf: Vec<u8> = Vec::new();
     let mut accum = ToolAccum::default();
+    // The provider's own verdict on why the turn ended. `EndTurn` until told
+    // otherwise: a stream that never says is a stream that ended normally.
+    let mut stop = StopReason::EndTurn;
     while let Some(chunk) = chunks.next().await {
         buf.extend_from_slice(&chunk.map_err(err)?);
         for item in drain_sse(&mut buf, &parse) {
@@ -408,6 +451,9 @@ where
                         sink.emit(ev).await?;
                     }
                 }
+                // Recorded, not emitted — exactly one `Done` closes a turn, and
+                // it is sent below once the stream is fully drained.
+                SseItem::Stop(s) => stop = s,
                 other => sink.emit(item_to_event(other)?).await?,
             }
         }
@@ -415,8 +461,8 @@ where
     for ev in accum.flush() {
         sink.emit(ev).await?;
     }
-    sink.emit(AgentEvent::Done(StopReason::EndTurn)).await?;
-    Ok(StopReason::EndTurn)
+    sink.emit(AgentEvent::Done(stop)).await?;
+    Ok(stop)
 }
 
 /// Thin wrapper: drive [`stream_items`] over a live HTTP response's byte stream.
@@ -808,6 +854,48 @@ mod tests {
         assert_eq!(
             pick_base(Some("https://proxy/v1/"), None, "https://d/v1"),
             "https://proxy/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_reports_truncation_returns_max_tokens() {
+        // The gap a `parse_line` test cannot cover: emitting `SseItem::Stop` is
+        // useless unless `stream_items` carries it into the `Done` event and the
+        // returned `StopReason`. Making the recorded value unused still passed
+        // every per-provider test, which is what this is here to prevent.
+        let collect = CollectSink::default();
+        let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
+        let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(
+            b"data: text\ndata: cut\n",
+        ))]);
+        let parse = |data: &str| -> Vec<SseItem> {
+            match data {
+                "text" => vec![SseItem::Text("half a sen".into())],
+                "cut" => vec![SseItem::Stop(StopReason::MaxTokens)],
+                _ => vec![],
+            }
+        };
+
+        let returned = stream_items(chunks, &sink, parse).await.unwrap();
+        assert_eq!(returned, StopReason::MaxTokens);
+        assert!(
+            collect
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Done(StopReason::MaxTokens))),
+            "the host learns about truncation through Done, not just the return"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_says_nothing_still_ends_normally() {
+        let collect = CollectSink::default();
+        let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
+        let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(b"data: t\n"))]);
+        let parse = |_: &str| -> Vec<SseItem> { vec![SseItem::Text("hi".into())] };
+        assert_eq!(
+            stream_items(chunks, &sink, parse).await.unwrap(),
+            StopReason::EndTurn
         );
     }
 }
