@@ -130,9 +130,19 @@ fn resolve_tool_name(turns: &[Turn], result_turn_index: usize, id: &str) -> Opti
 /// Map one turn entry onto a Gemini `parts` entry. `turns`/`turn_index` are
 /// needed only to resolve a `ToolResult`'s id back to its tool name (see
 /// [`resolve_tool_name`]).
+///
+/// `ContentBlock::Audio` and the two resource variants are still dropped —
+/// Gemini can carry audio inline, but ACP's `AudioContent` and Gemini's
+/// accepted formats are not the same set, and guessing is worse than omitting.
 fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_json::Value> {
     match entry {
         Entry::Block(ContentBlock::Text(t)) => Some(serde_json::json!({ "text": t.text })),
+        // camelCase to match the `functionCall`/`functionResponse` parts this
+        // module already emits. Gemini's proto3 JSON mapping accepts either
+        // spelling; mixing both in one request body would only invite doubt.
+        Entry::Block(ContentBlock::Image(i)) => Some(serde_json::json!({
+            "inlineData": { "mimeType": i.mime_type, "data": i.data },
+        })),
         Entry::Block(_) => None,
         Entry::ToolCall(ToolInvocation {
             name,
@@ -383,7 +393,7 @@ impl Agent for GeminiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use manch_protocol::acp::{ContentBlock, TextContent};
+    use manch_protocol::acp::{ContentBlock, ImageContent, TextContent};
     use manch_protocol::{Entry, Role, Turn};
 
     fn u(text: &str) -> Turn {
@@ -744,5 +754,39 @@ mod tests {
     fn new_uses_fallback_when_model_none() {
         let g = GeminiAgent::new("k".into(), None);
         assert_eq!(g.model, FALLBACK_MODEL);
+    }
+
+    #[test]
+    fn an_image_block_reaches_gemini_as_an_inline_data_part() {
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new(
+                    "read this".to_string(),
+                ))),
+                Entry::Block(ContentBlock::Image(ImageContent::new(
+                    "AAAA".to_string(),
+                    "image/png".to_string(),
+                ))),
+            ],
+        };
+        let body = request_body(&[turn], &[]);
+        let parts = &body["contents"][0]["parts"];
+        assert_eq!(parts[0]["text"], "read this");
+        assert_eq!(
+            parts[1],
+            serde_json::json!({ "inlineData": { "mimeType": "image/png", "data": "AAAA" } })
+        );
+    }
+
+    /// Regression guard, not a RED test: an all-text turn must still collapse to
+    /// the single merged `{ "text": .. }` part it produced before.
+    #[test]
+    fn a_text_only_turn_still_collapses_to_one_text_part() {
+        let body = request_body(&[u("hi")], &[]);
+        assert_eq!(
+            body["contents"][0]["parts"],
+            serde_json::json!([{ "text": "hi" }])
+        );
     }
 }
