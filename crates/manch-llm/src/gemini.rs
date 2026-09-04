@@ -27,6 +27,7 @@ pub struct GeminiAgent {
     api_key: String,
     model: String,
     base: String,
+    max_output_tokens: u32,
 }
 
 impl GeminiAgent {
@@ -35,7 +36,18 @@ impl GeminiAgent {
             api_key,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
             base: crate::resolve_base("gemini", None, DEFAULT_BASE),
+            max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
         }
+    }
+
+    /// Cap the model's output, in tokens. Defaults to
+    /// [`DEFAULT_MAX_OUTPUT_TOKENS`](crate::DEFAULT_MAX_OUTPUT_TOKENS). Gemini
+    /// publishes each model's real ceiling as
+    /// [`ModelInfo::max_output_tokens`](crate::ModelInfo::max_output_tokens).
+    #[must_use]
+    pub fn max_output_tokens(mut self, n: u32) -> Self {
+        self.max_output_tokens = n;
+        self
     }
 
     /// Point this agent at an alternative endpoint. Wins over `MANCH_GEMINI_BASE_URL`.
@@ -211,7 +223,11 @@ fn turn_parts(turn: &Turn, turns: &[Turn], turn_index: usize) -> Vec<serde_json:
 /// Gemini's wire format, not something this function can resolve. Preserving
 /// issue order (never reordering or merging) is the best available reading of
 /// a wire format that cannot express the distinction.
-pub(crate) fn request_body(turns: &[Turn], tools: &[ToolSchema]) -> serde_json::Value {
+pub(crate) fn request_body(
+    turns: &[Turn],
+    tools: &[ToolSchema],
+    max_output_tokens: u32,
+) -> serde_json::Value {
     let contents: Vec<serde_json::Value> = turns
         .iter()
         .enumerate()
@@ -223,7 +239,13 @@ pub(crate) fn request_body(turns: &[Turn], tools: &[ToolSchema]) -> serde_json::
             serde_json::json!({ "role": role, "parts": turn_parts(t, turns, i) })
         })
         .collect();
-    let mut body = serde_json::json!({ "contents": contents });
+    let mut body = serde_json::json!({
+        "contents": contents,
+        // Gemini previously ran uncapped while Anthropic was pinned at 1024, so
+        // the same prompt produced very different lengths per provider — the
+        // inconsistency that made this hard to attribute from outside.
+        "generationConfig": { "maxOutputTokens": max_output_tokens },
+    });
     if !tools.is_empty() {
         body["tools"] = tools_json(tools);
     }
@@ -243,6 +265,15 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
         return vec![SseItem::Error(format!("gemini: {msg}"))];
     }
     let mut out = Vec::new();
+    if let Some(reason) = v
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("finishReason"))
+        .and_then(|r| r.as_str())
+    {
+        out.push(SseItem::Stop(crate::stop_reason(reason)));
+    }
     let parts = v
         .get("candidates")
         .and_then(|c| c.as_array())
@@ -394,7 +425,7 @@ impl Agent for GeminiAgent {
         let resp = reqwest::Client::new()
             .post(stream_url(&self.base, &self.model))
             .header("x-goog-api-key", &self.api_key)
-            .json(&request_body(&ctx.turns, tools))
+            .json(&request_body(&ctx.turns, tools, self.max_output_tokens))
             .send()
             .await
             .map_err(err)?;
@@ -431,14 +462,14 @@ mod tests {
 
     #[test]
     fn request_body_maps_single_user_turn() {
-        let body = request_body(&[u("hi")], &[]);
+        let body = request_body(&[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
     }
 
     #[test]
     fn request_body_maps_assistant_to_model_role() {
-        let body = request_body(&[u("q1"), a("a1")], &[]);
+        let body = request_body(&[u("q1"), a("a1")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(body["contents"][1]["role"], "model");
         assert_eq!(body["contents"][1]["parts"][0]["text"], "a1");
     }
@@ -515,7 +546,8 @@ mod tests {
                 provider_meta: Some(serde_json::json!({"thoughtSignature": "sig-abc"})),
             })],
         }];
-        let part = &request_body(&turns, &[])["contents"][0]["parts"][0];
+        let part =
+            &request_body(&turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS)["contents"][0]["parts"][0];
         assert_eq!(part["functionCall"]["name"], "search");
         assert_eq!(
             part["thoughtSignature"], "sig-abc",
@@ -535,7 +567,8 @@ mod tests {
                 provider_meta: None,
             })],
         }];
-        let part = &request_body(&turns, &[])["contents"][0]["parts"][0];
+        let part =
+            &request_body(&turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS)["contents"][0]["parts"][0];
         assert!(
             part.get("thoughtSignature").is_none(),
             "absent means absent, not null: {part}"
@@ -574,7 +607,7 @@ mod tests {
                 }],
             },
         ];
-        let body = request_body(&turns, &[]);
+        let body = request_body(&turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(
             body["contents"][0]["parts"][0]["functionCall"]["name"],
             "search"
@@ -622,7 +655,7 @@ mod tests {
                 ],
             },
         ];
-        let body = request_body(&turns, &[]);
+        let body = request_body(&turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         let calls = body["contents"][0]["parts"]
             .as_array()
             .expect("call parts")
@@ -654,7 +687,7 @@ mod tests {
 
     #[test]
     fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
-        let body = request_body(&[u("hi")], &[]);
+        let body = request_body(&[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert!(
             body.get("tools").is_none(),
             "an empty tools array changes model behaviour"
@@ -671,7 +704,7 @@ mod tests {
             kind: ToolKind::Other,
             input_schema: serde_json::json!({ "type": "object" }),
         };
-        let body = request_body(&[u("hi")], &[s]);
+        let body = request_body(&[u("hi")], &[s], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(
             body["tools"][0]["functionDeclarations"][0]["name"],
             "search"
@@ -786,7 +819,7 @@ mod tests {
                 ))),
             ],
         };
-        let body = request_body(&[turn], &[]);
+        let body = request_body(&[turn], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         let parts = &body["contents"][0]["parts"];
         assert_eq!(parts[0]["text"], "read this");
         assert_eq!(
@@ -799,7 +832,7 @@ mod tests {
     /// the single merged `{ "text": .. }` part it produced before.
     #[test]
     fn a_text_only_turn_still_collapses_to_one_text_part() {
-        let body = request_body(&[u("hi")], &[]);
+        let body = request_body(&[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(
             body["contents"][0]["parts"],
             serde_json::json!([{ "text": "hi" }])
@@ -886,5 +919,35 @@ mod tests {
         assert_eq!(u.thought_tokens, None);
         assert_eq!(u.total_tokens, None);
         assert_eq!(u.cached_read_tokens, None);
+    }
+
+    #[test]
+    fn the_request_carries_an_output_cap() {
+        // Gemini previously sent none at all, so the same prompt was capped on
+        // Anthropic and uncapped here — the inconsistency #64 is really about.
+        let body = request_body(&[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(
+            body["generationConfig"]["maxOutputTokens"],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn a_truncated_turn_reports_max_tokens_not_end_turn() {
+        // Captured from a live truncated stream on 2026-09-04.
+        let d = r#"{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"finishReason":"MAX_TOKENS","index":0}]}"#;
+        assert!(parse_line(d).iter().any(|i| matches!(
+            i,
+            crate::SseItem::Stop(manch_protocol::acp::StopReason::MaxTokens)
+        )));
+    }
+
+    #[test]
+    fn a_normal_finish_still_reads_as_end_turn() {
+        let d = r#"{"candidates":[{"content":{"parts":[{"text":"done"}],"role":"model"},"finishReason":"STOP","index":0}]}"#;
+        assert!(parse_line(d).iter().any(|i| matches!(
+            i,
+            crate::SseItem::Stop(manch_protocol::acp::StopReason::EndTurn)
+        )));
     }
 }

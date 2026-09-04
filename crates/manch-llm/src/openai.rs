@@ -27,6 +27,7 @@ pub struct OpenAiAgent {
     /// reports its own id, so a host routing on `Agent::id` is not told
     /// Fireworks is OpenAI.
     id: &'static str,
+    max_output_tokens: u32,
 }
 
 impl OpenAiAgent {
@@ -36,7 +37,21 @@ impl OpenAiAgent {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
             base: crate::resolve_base("openai", None, DEFAULT_BASE),
             id: "openai",
+            max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
         }
+    }
+
+    /// Cap the model's output, in tokens. Defaults to
+    /// [`DEFAULT_MAX_OUTPUT_TOKENS`](crate::DEFAULT_MAX_OUTPUT_TOKENS).
+    #[must_use]
+    pub fn max_output_tokens(mut self, n: u32) -> Self {
+        self.max_output_tokens = n;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_output_tokens_for_test(&self) -> u32 {
+        self.max_output_tokens
     }
 
     /// An **OpenAI-compatible** provider: same wire format, its own id, base
@@ -66,6 +81,7 @@ impl OpenAiAgent {
             model: model.unwrap_or_else(|| fallback_model.to_string()),
             base: crate::resolve_base(env_key, None, default_base),
             id,
+            max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
         }
     }
 
@@ -267,7 +283,13 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
 ///
 /// `tools` is omitted from the body entirely when empty — an empty `tools: []`
 /// array is not the same fact to a model as no tools being registered.
-pub(crate) fn request_body(model: &str, turns: &[Turn], tools: &[ToolSchema]) -> serde_json::Value {
+pub(crate) fn request_body(
+    model: &str,
+    turns: &[Turn],
+    tools: &[ToolSchema],
+    max_output_tokens: u32,
+    id: &str,
+) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = turns.iter().flat_map(turn_messages).collect();
     let mut body = serde_json::json!({
         "model": model,
@@ -279,6 +301,20 @@ pub(crate) fn request_body(model: &str, turns: &[Turn], tools: &[ToolSchema]) ->
     });
     if !tools.is_empty() {
         body["tools"] = tools_json(tools);
+    }
+    // Which parameter names the output cap depends on who is answering.
+    //
+    // OpenAI itself deprecated `max_tokens` and rejects it outright on the
+    // reasoning models, so the vendor gets `max_completion_tokens`. The
+    // compatible providers a BYOK user actually brings a key for — Together,
+    // OpenRouter, Groq, a local vLLM — universally understand `max_tokens` and
+    // are far less consistent about the newer name. Sending the right one per
+    // dialect costs three lines; sending the wrong one costs an uncapped turn
+    // or a 400, and neither is visible from the host.
+    if id == "openai" {
+        body["max_completion_tokens"] = max_output_tokens.into();
+    } else {
+        body["max_tokens"] = max_output_tokens.into();
     }
     body
 }
@@ -328,10 +364,20 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     if !content.is_empty() {
         out.push(SseItem::Text(content.to_string()));
     }
-    // `finish_reason: "tool_calls"` is deliberately ignored: it arrives on a
-    // frame that carries no index, and OpenAI never marks an individual call
-    // finished on its own — ToolAccum::flush closes whatever is still open
-    // when the stream ends (Task 10).
+    // `finish_reason` closes the turn. `"tool_calls"` is deliberately *not*
+    // treated as a tool-call signal: it arrives on a frame that carries no
+    // index, and OpenAI never marks an individual call finished on its own —
+    // `ToolAccum::flush` closes whatever is still open when the stream ends
+    // (Task 10). It still maps to `EndTurn` like any other ordinary finish.
+    if let Some(reason) = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|r| r.as_str())
+    {
+        out.push(SseItem::Stop(crate::stop_reason(reason)));
+    }
     if let Some(tool_calls) = delta
         .and_then(|d| d.get("tool_calls"))
         .and_then(|t| t.as_array())
@@ -454,7 +500,13 @@ impl Agent for OpenAiAgent {
         let resp = reqwest::Client::new()
             .post(completions_url(&self.base))
             .bearer_auth(&self.api_key)
-            .json(&request_body(&self.model, &ctx.turns, tools))
+            .json(&request_body(
+                &self.model,
+                &ctx.turns,
+                tools,
+                self.max_output_tokens,
+                self.id,
+            ))
             .send()
             .await
             .map_err(err)?;
@@ -491,7 +543,13 @@ mod tests {
 
     #[test]
     fn request_body_maps_single_user_turn() {
-        let body = request_body("gpt-5", &[u("hi")], &[]);
+        let body = request_body(
+            "gpt-5",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         assert_eq!(body["model"], "gpt-5");
         assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "user");
@@ -500,7 +558,13 @@ mod tests {
 
     #[test]
     fn request_body_preserves_assistant_role() {
-        let body = request_body("m", &[u("q1"), a("a1"), u("q2")], &[]);
+        let body = request_body(
+            "m",
+            &[u("q1"), a("a1"), u("q2")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][1]["content"], "a1");
@@ -539,7 +603,13 @@ mod tests {
     #[test]
     fn request_body_opts_into_streamed_usage() {
         // Chat Completions reports no usage in stream mode unless asked.
-        let body = request_body("gpt-5-chat-latest", &[u("hi")], &[]);
+        let body = request_body(
+            "gpt-5-chat-latest",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -574,12 +644,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_line_emits_no_end_marker_for_openai() {
-        // OpenAI never marks an individual call finished, and a pure parse_line has
-        // no memory of which indexes are open. ToolAccum::flush closes them when
-        // the stream ends (Task 10).
+    fn a_finish_reason_frame_closes_the_turn_but_never_a_single_tool_call() {
+        // Replaces `parse_line_emits_no_end_marker_for_openai`, which asserted
+        // this frame yielded *nothing*. It now yields the turn's stop reason —
+        // that is the whole point of #64, since discarding it is what made a
+        // truncated turn look like a finished one.
+        //
+        // The original claim it was really protecting still holds and is what
+        // is asserted here: OpenAI never marks an individual call finished, and
+        // a pure `parse_line` has no memory of which indexes are open, so no
+        // `ToolCallEnd` may be inferred. `ToolAccum::flush` closes them when the
+        // stream ends.
         let d = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
-        assert!(parse_line(d).is_empty());
+        let items = parse_line(d);
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, crate::SseItem::ToolCallEnd { .. })),
+            "a finish_reason frame must never close an individual tool call"
+        );
+        assert!(items.iter().any(|i| matches!(
+            i,
+            crate::SseItem::Stop(manch_protocol::acp::StopReason::EndTurn)
+        )));
     }
 
     #[test]
@@ -602,7 +689,7 @@ mod tests {
                 }],
             },
         ];
-        let body = request_body("m", &turns, &[]);
+        let body = request_body("m", &turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS, "openai");
         assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "c1");
         assert_eq!(
             body["messages"][0]["tool_calls"][0]["function"]["name"],
@@ -642,7 +729,7 @@ mod tests {
                 }],
             },
         ];
-        let body = request_body("m", &turns, &[]);
+        let body = request_body("m", &turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS, "openai");
         let messages = body["messages"].as_array().expect("messages array");
         assert_eq!(
             messages.len(),
@@ -661,7 +748,13 @@ mod tests {
 
     #[test]
     fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
-        let body = request_body("m", &[u("hi")], &[]);
+        let body = request_body(
+            "m",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         assert!(
             body.get("tools").is_none(),
             "an empty tools array changes model behaviour"
@@ -678,7 +771,13 @@ mod tests {
             kind: ToolKind::Other,
             input_schema: serde_json::json!({ "type": "object" }),
         };
-        let body = request_body("m", &[u("hi")], &[s]);
+        let body = request_body(
+            "m",
+            &[u("hi")],
+            &[s],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         assert_eq!(body["tools"][0]["function"]["name"], "search");
     }
 
@@ -765,7 +864,13 @@ mod tests {
                 ))),
             ],
         };
-        let body = request_body("gpt-5-chat-latest", &[turn], &[]);
+        let body = request_body(
+            "gpt-5-chat-latest",
+            &[turn],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         let content = &body["messages"][0]["content"];
         assert_eq!(
             content[0],
@@ -784,7 +889,13 @@ mod tests {
     /// parts array, and every existing all-text call must keep the string.
     #[test]
     fn a_text_only_turn_still_serialises_content_as_a_bare_string() {
-        let body = request_body("gpt-5-chat-latest", &[u("hi")], &[]);
+        let body = request_body(
+            "gpt-5-chat-latest",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
         assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
     }
 
@@ -814,5 +925,44 @@ mod tests {
         assert_eq!(u.thought_tokens, Some(7));
         // OpenAI caches automatically; there is no write count to report.
         assert_eq!(u.cached_write_tokens, None);
+    }
+
+    #[test]
+    fn openai_proper_gets_max_completion_tokens() {
+        // `max_tokens` is rejected outright by OpenAI's reasoning models, so
+        // the vendor gets the parameter that still works on all of them.
+        let a = OpenAiAgent::new("k".into(), None);
+        let body = request_body(
+            "gpt-5-chat-latest",
+            &[u("hi")],
+            &[],
+            a.max_output_tokens_for_test(),
+            a.id(),
+        );
+        assert_eq!(
+            body["max_completion_tokens"],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn a_compatible_provider_gets_max_tokens() {
+        // Together, OpenRouter and friends universally understand `max_tokens`;
+        // `max_completion_tokens` is far less evenly supported. Breadth wins on
+        // the path a BYOK user actually brings a key for.
+        let a = crate::fireworks::agent("k".into(), None);
+        let body = request_body("m", &[u("hi")], &[], a.max_output_tokens_for_test(), a.id());
+        assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn a_truncated_turn_reports_max_tokens_not_end_turn() {
+        let d = r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#;
+        assert!(parse_line(d).iter().any(|i| matches!(
+            i,
+            crate::SseItem::Stop(manch_protocol::acp::StopReason::MaxTokens)
+        )));
     }
 }

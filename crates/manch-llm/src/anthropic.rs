@@ -12,7 +12,6 @@ use crate::{ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, token_co
 
 pub(crate) const DEFAULT_BASE: &str = "https://api.anthropic.com/v1";
 const VERSION: &str = "2023-06-01";
-const MAX_TOKENS: u32 = 1024;
 pub(crate) const FALLBACK_MODEL: &str = "claude-opus-4-8"; // authoritative — do not change
 
 /// BYOK Anthropic via a hand-rolled Messages-API call.
@@ -20,6 +19,7 @@ pub struct AnthropicAgent {
     api_key: String,
     model: String,
     base: String,
+    max_output_tokens: u32,
 }
 
 impl AnthropicAgent {
@@ -28,7 +28,26 @@ impl AnthropicAgent {
             api_key,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
             base: crate::resolve_base("anthropic", None, DEFAULT_BASE),
+            max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
         }
+    }
+
+    /// Cap the model's output, in tokens. Defaults to
+    /// [`DEFAULT_MAX_OUTPUT_TOKENS`](crate::DEFAULT_MAX_OUTPUT_TOKENS).
+    ///
+    /// Anthropic *requires* this parameter and rejects a value above the
+    /// model's ceiling, so raise it against a known model rather than blindly —
+    /// [`ModelInfo::max_output_tokens`](crate::ModelInfo::max_output_tokens)
+    /// carries that ceiling where the provider publishes one.
+    #[must_use]
+    pub fn max_output_tokens(mut self, n: u32) -> Self {
+        self.max_output_tokens = n;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_output_tokens_for_test(&self) -> u32 {
+        self.max_output_tokens
     }
 
     /// Point this agent at an alternative endpoint (a managed-tier proxy, or an
@@ -166,7 +185,12 @@ fn turn_content(turn: &Turn) -> serde_json::Value {
 ///
 /// `tools` is omitted from the body entirely when empty — an empty `tools: []`
 /// array is not the same fact to a model as no tools being registered.
-pub(crate) fn request_body(model: &str, turns: &[Turn], tools: &[ToolSchema]) -> serde_json::Value {
+pub(crate) fn request_body(
+    model: &str,
+    turns: &[Turn],
+    tools: &[ToolSchema],
+    max_output_tokens: u32,
+) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = turns
         .iter()
         .map(|t| {
@@ -179,7 +203,7 @@ pub(crate) fn request_body(model: &str, turns: &[Turn], tools: &[ToolSchema]) ->
         .collect();
     let mut body = serde_json::json!({
         "model": model,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_output_tokens,
         "stream": true,
         "messages": messages,
     });
@@ -255,6 +279,16 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
             }
         }
         Some("message_delta") => {
+            // The only frame carrying Anthropic's verdict. Discarding it made a
+            // turn cut off at `max_tokens` indistinguishable from one that
+            // finished — the text simply stopped.
+            if let Some(r) = v
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|r| r.as_str())
+            {
+                out.push(SseItem::Stop(crate::stop_reason(r)));
+            }
             // The closing frame carries only the output total; input was reported
             // at message_start and must not be re-asserted as absent.
             if let Some(u) = v.get("usage") {
@@ -349,7 +383,12 @@ impl Agent for AnthropicAgent {
             .post(messages_url(&self.base))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", VERSION)
-            .json(&request_body(&self.model, &ctx.turns, tools))
+            .json(&request_body(
+                &self.model,
+                &ctx.turns,
+                tools,
+                self.max_output_tokens,
+            ))
             .send()
             .await
             .map_err(err)?;
@@ -386,7 +425,12 @@ mod tests {
 
     #[test]
     fn request_body_maps_single_user_turn() {
-        let body = request_body("claude-opus-4-8", &[u("hi")], &[]);
+        let body = request_body(
+            "claude-opus-4-8",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+        );
         assert_eq!(body["model"], "claude-opus-4-8");
         assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "user");
@@ -395,7 +439,12 @@ mod tests {
 
     #[test]
     fn request_body_preserves_assistant_role() {
-        let body = request_body("m", &[u("q1"), a("a1"), u("q2")], &[]);
+        let body = request_body(
+            "m",
+            &[u("q1"), a("a1"), u("q2")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+        );
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][1]["content"], "a1");
@@ -438,7 +487,7 @@ mod tests {
                 }],
             },
         ];
-        let body = request_body("m", &turns, &[]);
+        let body = request_body("m", &turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
         assert_eq!(body["messages"][0]["content"][0]["id"], "c1");
         assert_eq!(body["messages"][0]["content"][0]["name"], "search");
@@ -448,7 +497,7 @@ mod tests {
 
     #[test]
     fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
-        let body = request_body("m", &[u("hi")], &[]);
+        let body = request_body("m", &[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert!(
             body.get("tools").is_none(),
             "an empty tools array changes model behaviour"
@@ -465,7 +514,7 @@ mod tests {
             kind: ToolKind::Other,
             input_schema: serde_json::json!({ "type": "object" }),
         };
-        let body = request_body("m", &[u("hi")], &[s]);
+        let body = request_body("m", &[u("hi")], &[s], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(body["tools"][0]["name"], "search");
     }
 
@@ -496,11 +545,19 @@ mod tests {
 
     #[test]
     fn parse_line_reports_output_tokens_from_message_delta() {
+        // Matches on the usage item rather than the whole slice: the same frame
+        // now also yields the turn's stop reason, which it always carried and
+        // this parser used to throw away.
         let d = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}"#;
-        assert!(matches!(
-            parse_line(d).as_slice(),
-            [crate::SseItem::Usage(u)] if u.output_tokens == Some(25) && u.input_tokens.is_none()
-        ));
+        let u = parse_line(d)
+            .into_iter()
+            .find_map(|i| match i {
+                crate::SseItem::Usage(u) => Some(u),
+                _ => None,
+            })
+            .expect("message_delta must still report usage");
+        assert_eq!(u.output_tokens, Some(25));
+        assert!(u.input_tokens.is_none());
     }
 
     #[test]
@@ -587,7 +644,12 @@ mod tests {
                 image("image/png", "AAAA"),
             ],
         };
-        let body = request_body("claude-opus-4-8", &[turn], &[]);
+        let body = request_body(
+            "claude-opus-4-8",
+            &[turn],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+        );
         let content = &body["messages"][0]["content"];
         // The prose alongside the image must survive as well.
         assert_eq!(content[0]["text"], "read this");
@@ -604,7 +666,12 @@ mod tests {
     /// as a bare string, byte for byte as before multimodal support landed.
     #[test]
     fn a_text_only_turn_still_serialises_as_a_bare_string() {
-        let body = request_body("claude-opus-4-8", &[u("hi")], &[]);
+        let body = request_body(
+            "claude-opus-4-8",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+        );
         assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
     }
 
@@ -638,5 +705,42 @@ mod tests {
         assert_eq!(u.cached_read_tokens, Some(512));
         // Anthropic sends no total; deriving one would be a guess.
         assert_eq!(u.total_tokens, None);
+    }
+
+    #[test]
+    fn the_output_cap_defaults_to_the_shared_constant_not_1024() {
+        // Was a private `const MAX_TOKENS: u32 = 1024` — about 750 words, which
+        // cut a drafted section off mid-sentence with no way for a host to say
+        // otherwise.
+        let a = AnthropicAgent::new("k".into(), None);
+        let body = request_body(
+            "claude-opus-4-8",
+            &[u("hi")],
+            &[],
+            a.max_output_tokens_for_test(),
+        );
+        assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn a_host_can_set_the_output_cap() {
+        let a = AnthropicAgent::new("k".into(), None).max_output_tokens(32_000);
+        let body = request_body(
+            "claude-opus-4-8",
+            &[u("hi")],
+            &[],
+            a.max_output_tokens_for_test(),
+        );
+        assert_eq!(body["max_tokens"], 32_000);
+    }
+
+    #[test]
+    fn a_truncated_turn_reports_max_tokens_not_end_turn() {
+        // Anthropic puts the verdict on the closing `message_delta` frame.
+        let d = r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":8192}}"#;
+        assert!(parse_line(d).iter().any(|i| matches!(
+            i,
+            crate::SseItem::Stop(manch_protocol::acp::StopReason::MaxTokens)
+        )));
     }
 }

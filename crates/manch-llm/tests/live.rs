@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use manch_llm::{AnthropicAgent, GeminiAgent, OpenAiAgent};
 use manch_protocol::acp::{
-    Content, ContentBlock, ImageContent, SessionUpdate, TextContent, ToolCallContent, ToolKind,
+    Content, ContentBlock, ImageContent, SessionUpdate, StopReason, TextContent, ToolCallContent,
+    ToolKind,
 };
 use manch_protocol::{
     Agent, AgentEvent, Context, Entry, EventSink, Result, Role, ToolSchema, Turn,
@@ -587,5 +588,36 @@ async fn gemini_reports_a_total_larger_than_input_plus_output_when_thinking() {
         usage.thought_tokens.is_some_and(|t| t > 0),
         "expected thought tokens to be reported and non-zero, got {:?}",
         usage.thought_tokens
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Truncation: a cut-off turn must be distinguishable from a finished one.
+//
+// The failure this guards is silent by construction — the stream ends, the text
+// simply stops, and a `StopReason::EndTurn` says everything went fine. Only a
+// real provider can confirm the reason arrives where the parser expects it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_reports_max_tokens_when_the_cap_cuts_a_turn_off() {
+    let sink = Arc::new(Collector::default());
+    let stop = GeminiAgent::new(key("GEMINI_API_KEY"), None)
+        // Far below what the prompt needs, so truncation is certain.
+        .max_output_tokens(16)
+        .prompt(
+            ask("Write 300 words about monsoon rain."),
+            &[],
+            sink.clone(),
+        )
+        .await
+        .expect("gemini: prompt failed");
+
+    assert_eq!(
+        stop,
+        StopReason::MaxTokens,
+        "a turn cut off by the output cap must not report EndTurn — that is \
+         exactly the silent truncation #64 is about"
     );
 }
