@@ -99,6 +99,7 @@ mod tests {
         let usage = Usage {
             input_tokens: Some(12),
             output_tokens: Some(4),
+            ..Default::default()
         };
         sink.emit(AgentEvent::Usage(usage)).await.unwrap();
         assert!(matches!(

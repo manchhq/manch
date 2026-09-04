@@ -241,6 +241,16 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                 out.push(SseItem::Usage(manch_protocol::Usage {
                     input_tokens: token_count(u, "input_tokens"),
                     output_tokens: token_count(u, "output_tokens"),
+                    // Anthropic is the only provider that separates writing to
+                    // the cache from reading it, because it bills them
+                    // differently — a write costs more than an ordinary input
+                    // token, a read far less.
+                    cached_write_tokens: token_count(u, "cache_creation_input_tokens"),
+                    cached_read_tokens: token_count(u, "cache_read_input_tokens"),
+                    // Anthropic sends no total and no reasoning count; deriving
+                    // either would be a guess.
+                    total_tokens: None,
+                    thought_tokens: None,
                 }));
             }
         }
@@ -251,6 +261,16 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                 out.push(SseItem::Usage(manch_protocol::Usage {
                     input_tokens: token_count(u, "input_tokens"),
                     output_tokens: token_count(u, "output_tokens"),
+                    // Anthropic is the only provider that separates writing to
+                    // the cache from reading it, because it bills them
+                    // differently — a write costs more than an ordinary input
+                    // token, a read far less.
+                    cached_write_tokens: token_count(u, "cache_creation_input_tokens"),
+                    cached_read_tokens: token_count(u, "cache_read_input_tokens"),
+                    // Anthropic sends no total and no reasoning count; deriving
+                    // either would be a guess.
+                    total_tokens: None,
+                    thought_tokens: None,
                 }));
             }
         }
@@ -600,5 +620,23 @@ mod tests {
         assert_eq!(m.supports_image_input, None);
         assert_eq!(m.context_window, None);
         assert_eq!(m.kind, Some(ModelKind::Chat));
+    }
+
+    #[test]
+    fn parse_line_reports_anthropic_cache_reads_and_writes() {
+        // Anthropic is the only one of the three that distinguishes writing to
+        // the cache from reading it — it bills the two differently.
+        let d = r#"{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1,"cache_creation_input_tokens":2048,"cache_read_input_tokens":512}}}"#;
+        let u = match parse_line(d).into_iter().find_map(|i| match i {
+            crate::SseItem::Usage(u) => Some(u),
+            _ => None,
+        }) {
+            Some(u) => u,
+            None => panic!("no usage item"),
+        };
+        assert_eq!(u.cached_write_tokens, Some(2048));
+        assert_eq!(u.cached_read_tokens, Some(512));
+        // Anthropic sends no total; deriving one would be a guess.
+        assert_eq!(u.total_tokens, None);
     }
 }

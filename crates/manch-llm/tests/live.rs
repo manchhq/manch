@@ -533,3 +533,59 @@ async fn fireworks_returns_its_real_catalogue_not_just_the_fallback() {
          several, so this flag is not surviving the parse"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Usage: the counts a spend display is built on.
+//
+// Unit tests pin the field names against captured bodies. What they cannot
+// catch is a provider renaming or nesting a field — which is exactly how
+// `reasoning_tokens` hides, since reading it off the top level yields a
+// perfectly typed `None` on every single request.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_reports_a_total_larger_than_input_plus_output_when_thinking() {
+    let sink = Arc::new(Collector::default());
+    GeminiAgent::new(key("GEMINI_API_KEY"), None)
+        .prompt(
+            ask("Think it through, then answer with the number only: what is 17 * 23?"),
+            &[],
+            sink.clone(),
+        )
+        .await
+        .expect("gemini: prompt failed");
+
+    let usage = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Usage(u) => Some(*u),
+            _ => None,
+        })
+        .next_back()
+        .expect("gemini reported no usage at all");
+
+    let (input, output, total) = (
+        usage.input_tokens.expect("no input count"),
+        usage.output_tokens.expect("no output count"),
+        usage
+            .total_tokens
+            .expect("no total count — totalTokenCount was not parsed"),
+    );
+    // The whole point of carrying the provider's own total: on a thinking
+    // model it exceeds the two visible counts, and the difference is billed.
+    assert!(
+        total > input + output,
+        "expected a total above input+output on a thinking model, got \
+         total={total} input={input} output={output} — if these are equal the \
+         thinking tokens are being lost"
+    );
+    assert!(
+        usage.thought_tokens.is_some_and(|t| t > 0),
+        "expected thought tokens to be reported and non-zero, got {:?}",
+        usage.thought_tokens
+    );
+}
