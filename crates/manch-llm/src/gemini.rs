@@ -8,7 +8,7 @@ use manch_protocol::{
     Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
 };
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
+use crate::{ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
 pub(crate) const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 // Stable alias — resolves to the current flash snapshot, so it won't rot like a
@@ -319,12 +319,21 @@ pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
                 .filter(|m| supports_streaming(m))
                 .filter_map(|m| {
                     let name = m.get("name")?.as_str()?;
+                    let num = |k: &str| m.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
                     Some(ModelInfo {
-                        id: name.strip_prefix("models/").unwrap_or(name).to_string(),
                         display_name: m
                             .get("displayName")
                             .and_then(|n| n.as_str())
                             .map(String::from),
+                        context_window: num("inputTokenLimit"),
+                        max_output_tokens: num("outputTokenLimit"),
+                        reasoning: m.get("thinking").and_then(|t| t.as_bool()),
+                        // Gemini publishes neither a tool flag nor an image
+                        // flag, so both stay unknown. `kind` is ours to state:
+                        // `supports_streaming` above has already dropped
+                        // everything that is not promptable.
+                        kind: Some(ModelKind::Chat),
+                        ..ModelInfo::new(name.strip_prefix("models/").unwrap_or(name))
                     })
                 })
                 .collect()
@@ -788,5 +797,35 @@ mod tests {
             body["contents"][0]["parts"],
             serde_json::json!([{ "text": "hi" }])
         );
+    }
+
+    #[test]
+    fn parse_models_reads_the_limits_and_thinking_flag_gemini_publishes() {
+        // Gemini is the one provider that publishes real numbers here; keeping
+        // only id and displayName threw them away.
+        let body = serde_json::json!({ "models": [{
+            "name": "models/gemini-2.5-flash",
+            "displayName": "Gemini 2.5 Flash",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "thinking": true,
+            "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]
+        }]});
+        let m = &parse_models(&body)[0];
+        assert_eq!(m.context_window, Some(1_048_576));
+        assert_eq!(m.max_output_tokens, Some(65_536));
+        assert_eq!(m.reasoning, Some(true));
+        assert_eq!(m.kind, Some(ModelKind::Chat));
+    }
+
+    #[test]
+    fn a_gemini_model_that_publishes_no_limits_reports_unknown() {
+        let body = serde_json::json!({ "models": [{
+            "name": "models/gemini-flash-latest",
+            "supportedGenerationMethods": ["streamGenerateContent"]
+        }]});
+        let m = &parse_models(&body)[0];
+        assert_eq!(m.context_window, None);
+        assert_eq!(m.reasoning, None, "unknown must not read as `false`");
     }
 }

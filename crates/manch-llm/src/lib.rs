@@ -27,11 +27,73 @@ pub use openai::OpenAiAgent;
 #[cfg(feature = "fireworks")]
 pub mod fireworks;
 
+/// What a model is *for*. Derived from whatever the provider publishes, so it
+/// is deliberately coarse: the question it answers is "would offering this in a
+/// chat picker be a mistake", not "what family is this".
+///
+/// `#[non_exhaustive]` from birth — catalogues gain kinds far faster than this
+/// crate ships breaking releases (see #40 for the cost of learning that late).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ModelKind {
+    /// Prompt-and-respond. The only kind an [`Agent`](manch_protocol::Agent) can drive.
+    Chat,
+    /// Produces vectors, not prose. Fireworks reports these as chat-capable,
+    /// which they are not in any useful sense.
+    Embedding,
+    /// Generates images rather than text.
+    Image,
+}
+
 /// A model advertised by a provider's list-models endpoint.
+///
+/// Everything past `id` is `Option` because providers disagree wildly about
+/// what they publish — Fireworks returns capability flags and a context length,
+/// Gemini returns token limits and a thinking flag, and OpenAI and Anthropic
+/// return essentially nothing. **An unknown capability reads as `None`, never
+/// as `false`**: a host that cannot tell "does not support tools" from "was not
+/// told" will route on the difference and be wrong.
+///
+/// `#[non_exhaustive]` because this is an output type — callers read it, and
+/// catalogues will keep publishing more than they do today. Build one with
+/// [`ModelInfo::new`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[non_exhaustive]
 pub struct ModelInfo {
     pub id: String,
     pub display_name: Option<String>,
+    /// Maximum input the model accepts, in tokens.
+    pub context_window: Option<u32>,
+    /// Maximum the model will generate in one response, in tokens.
+    pub max_output_tokens: Option<u32>,
+    /// Whether the model can be offered host-registered tools.
+    pub supports_tools: Option<bool>,
+    /// Whether the model accepts image content blocks (see the multimodal
+    /// mapping in each provider module). A host should know this *before*
+    /// sending a page, not from the provider's error.
+    pub supports_image_input: Option<bool>,
+    /// Whether this is a thinking/reasoning model. Not cosmetic: Gemini's
+    /// thinking models require `thoughtSignature` to be echoed back, which is a
+    /// behavioural difference a host currently cannot see coming.
+    pub reasoning: Option<bool>,
+    pub kind: Option<ModelKind>,
+}
+
+impl ModelInfo {
+    /// A model known only by its id — every capability unknown.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            display_name: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_tools: None,
+            supports_image_input: None,
+            reasoning: None,
+            kind: None,
+        }
+    }
 }
 
 /// One fact parsed out of an SSE line: streamed text, provider token counts, a
@@ -226,10 +288,7 @@ pub(crate) fn err(e: impl ToString) -> manch_protocol::Error {
 
 /// Build a `ModelInfo` for a provider's fallback id.
 pub(crate) fn fallback_model(id: &str) -> ModelInfo {
-    ModelInfo {
-        id: id.to_string(),
-        display_name: None,
-    }
+    ModelInfo::new(id)
 }
 
 /// Shared list-models flow: on a 2xx body, parse with the provider's `parse`
@@ -373,6 +432,11 @@ pub async fn list_models_at(
         "gemini" => gemini::list_models_at(api_key, base).await,
         #[cfg(feature = "openai")]
         "openai" => openai::list_models_at(api_key, base).await,
+        // Fireworks has its own catalogue *and* its own capability fields, so
+        // it routes to its own module rather than OpenAI's despite sharing the
+        // request dialect.
+        #[cfg(feature = "fireworks")]
+        "fireworks" => fireworks::list_models_at(api_key, base).await,
         _ => Err(manch_protocol::Error::NotFound(provider.to_string())),
     }
 }

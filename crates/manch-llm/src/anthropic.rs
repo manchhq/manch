@@ -8,7 +8,7 @@ use manch_protocol::{
     Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
 };
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
+use crate::{ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
 pub(crate) const DEFAULT_BASE: &str = "https://api.anthropic.com/v1";
 const VERSION: &str = "2023-06-01";
@@ -275,11 +275,17 @@ pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
             arr.iter()
                 .filter_map(|m| {
                     Some(ModelInfo {
-                        id: m.get("id")?.as_str()?.to_string(),
                         display_name: m
                             .get("display_name")
                             .and_then(|n| n.as_str())
                             .map(String::from),
+                        // Anthropic's `/v1/models` publishes id, display name,
+                        // type and a creation date — no capability at all — so
+                        // everything else stays unknown rather than guessed.
+                        // `kind` is the exception: the endpoint lists Claude
+                        // chat models and nothing else.
+                        kind: Some(ModelKind::Chat),
+                        ..ModelInfo::new(m.get("id")?.as_str()?)
                     })
                 })
                 .collect()
@@ -580,5 +586,19 @@ mod tests {
     fn a_text_only_turn_still_serialises_as_a_bare_string() {
         let body = request_body("claude-opus-4-8", &[u("hi")], &[]);
         assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn anthropic_capabilities_read_as_unknown_not_false() {
+        // `/v1/models` publishes no capability field at all. Defaulting these to
+        // `false` would tell a host that Claude cannot call tools.
+        let body = serde_json::json!({
+            "data": [{ "id": "claude-opus-4-8", "display_name": "Claude Opus 4.8" }]
+        });
+        let m = &parse_models(&body)[0];
+        assert_eq!(m.supports_tools, None);
+        assert_eq!(m.supports_image_input, None);
+        assert_eq!(m.context_window, None);
+        assert_eq!(m.kind, Some(ModelKind::Chat));
     }
 }
