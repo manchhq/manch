@@ -51,10 +51,6 @@ impl EventSink for InterceptSink {
             // them so a consumer can show spend. Never a billing source: a
             // managed tier meters at its own proxy.
             AgentEvent::Usage(u) => self.inner.emit(AgentEvent::Usage(u)).await,
-            // Explicit (not a catch-all) so that if `AgentEvent` grows a new
-            // variant, this match fails to compile instead of silently
-            // forwarding an unrecognized event to the caller as UI output.
-            //
             // Accumulate assistant text for persistence, then forward live as
             // UI output. Non-text updates pass through untouched.
             AgentEvent::Update(u) => {
@@ -65,6 +61,16 @@ impl EventSink for InterceptSink {
                 }
                 self.inner.emit(AgentEvent::Update(u)).await
             }
+            // `AgentEvent` is `#[non_exhaustive]`, so this arm is required and
+            // a new variant can no longer be caught here at compile time.
+            //
+            // Forwarding is the right default *for this type*: `InterceptSink`
+            // is a pass-through that exists to observe tool calls and assistant
+            // text on their way past. An event it does not recognise is not its
+            // business, and dropping one here would make it invisible to
+            // everything downstream. Forwarding at worst hands the UI something
+            // it ignores; dropping loses it outright.
+            other => self.inner.emit(other).await,
         }
     }
 }
