@@ -20,6 +20,7 @@ pub struct AnthropicAgent {
     model: String,
     base: String,
     max_output_tokens: u32,
+    cache_system_prompt: bool,
     http: crate::http::Http,
 }
 
@@ -30,9 +31,28 @@ impl AnthropicAgent {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
             base: crate::resolve_base("anthropic", None, DEFAULT_BASE),
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            cache_system_prompt: true,
             http: crate::http::Http::default(),
         }
     }
+    /// Mark the end of the system block as a prompt-cache breakpoint. On by
+    /// default.
+    ///
+    /// The economics favour it for the workloads Manch is built around. A cache
+    /// write costs ~1.25x an input token and a read ~0.1x, so it pays back after
+    /// roughly one and a half reuses — and a tool loop re-sends the whole
+    /// prefix on *every* iteration, as does a fan-out that re-reads the same
+    /// document per section. Anthropic also ignores the marker below its
+    /// minimum cacheable length, so a short system prompt costs nothing extra.
+    ///
+    /// Turn it off for a genuinely one-shot call with a long system prompt,
+    /// where the write premium is paid and never recovered.
+    #[must_use]
+    pub fn cache_system_prompt(mut self, on: bool) -> Self {
+        self.cache_system_prompt = on;
+        self
+    }
+
     /// Time allowed to establish a connection. See
     /// [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT).
     #[must_use]
@@ -207,6 +227,34 @@ fn turn_content(turn: &Turn) -> serde_json::Value {
     serde_json::Value::Array(turn.entries.iter().filter_map(entry_json).collect())
 }
 
+/// Anthropic's top-level `system` parameter: the text of every `Role::System`
+/// turn, in order, as content blocks. `None` when there are none — an empty
+/// `system` is not the same fact to a model as no system prompt.
+///
+/// **Position is not honoured, by necessity.** Anthropic has no in-band slot
+/// for system content, so a system turn appearing mid-conversation has no
+/// natural home; every one is hoisted and concatenated regardless of where it
+/// sat. Documented rather than silently surprising.
+///
+/// When `cache` is set, the *last* block carries the cache breakpoint. Caching
+/// is a prefix match, so the marker belongs at the end of the frozen prefix —
+/// marking an earlier block would cache less of it, and marking every block
+/// would spend breakpoints (there are only four) to no effect.
+fn system_blocks(turns: &[Turn], cache: bool) -> Option<serde_json::Value> {
+    let mut blocks: Vec<serde_json::Value> = turns
+        .iter()
+        .filter(|t| t.role == Role::System)
+        .map(|t| serde_json::json!({ "type": "text", "text": turn_text(t) }))
+        .collect();
+    if blocks.is_empty() {
+        return None;
+    }
+    if cache && let Some(last) = blocks.last_mut() {
+        last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+    }
+    Some(serde_json::Value::Array(blocks))
+}
+
 /// Build the Messages API request body from role-tagged turns. Pure.
 ///
 /// `tools` is omitted from the body entirely when empty — an empty `tools: []`
@@ -216,13 +264,18 @@ pub(crate) fn request_body(
     turns: &[Turn],
     tools: &[ToolSchema],
     max_output_tokens: u32,
+    cache_system_prompt: bool,
 ) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = turns
         .iter()
+        .filter(|t| t.role != Role::System)
         .map(|t| {
             let role = match t.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
+                // Filtered out above: Anthropic takes system content in a
+                // top-level parameter, never as a message.
+                Role::System => unreachable!("system turns are hoisted"),
             };
             serde_json::json!({ "role": role, "content": turn_content(t) })
         })
@@ -233,6 +286,9 @@ pub(crate) fn request_body(
         "stream": true,
         "messages": messages,
     });
+    if let Some(system) = system_blocks(turns, cache_system_prompt) {
+        body["system"] = system;
+    }
     if !tools.is_empty() {
         body["tools"] = tools_json(tools);
     }
@@ -418,6 +474,7 @@ impl Agent for AnthropicAgent {
                         &ctx.turns,
                         tools,
                         self.max_output_tokens,
+                        self.cache_system_prompt,
                     )),
             )
             .await?;
@@ -459,6 +516,7 @@ mod tests {
             &[u("hi")],
             &[],
             crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
         );
         assert_eq!(body["model"], "claude-opus-4-8");
         assert_eq!(body["stream"], true);
@@ -473,6 +531,7 @@ mod tests {
             &[u("q1"), a("a1"), u("q2")],
             &[],
             crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
         );
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][1]["role"], "assistant");
@@ -516,7 +575,7 @@ mod tests {
                 }],
             },
         ];
-        let body = request_body("m", &turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        let body = request_body("m", &turns, &[], crate::DEFAULT_MAX_OUTPUT_TOKENS, false);
         assert_eq!(body["messages"][0]["content"][0]["type"], "tool_use");
         assert_eq!(body["messages"][0]["content"][0]["id"], "c1");
         assert_eq!(body["messages"][0]["content"][0]["name"], "search");
@@ -526,7 +585,13 @@ mod tests {
 
     #[test]
     fn request_body_omits_the_tools_key_when_no_tools_are_registered() {
-        let body = request_body("m", &[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        let body = request_body(
+            "m",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
+        );
         assert!(
             body.get("tools").is_none(),
             "an empty tools array changes model behaviour"
@@ -543,7 +608,13 @@ mod tests {
             kind: ToolKind::Other,
             input_schema: serde_json::json!({ "type": "object" }),
         };
-        let body = request_body("m", &[u("hi")], &[s], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        let body = request_body(
+            "m",
+            &[u("hi")],
+            &[s],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
+        );
         assert_eq!(body["tools"][0]["name"], "search");
     }
 
@@ -678,6 +749,7 @@ mod tests {
             &[turn],
             &[],
             crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
         );
         let content = &body["messages"][0]["content"];
         // The prose alongside the image must survive as well.
@@ -700,6 +772,7 @@ mod tests {
             &[u("hi")],
             &[],
             crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
         );
         assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
     }
@@ -747,6 +820,7 @@ mod tests {
             &[u("hi")],
             &[],
             a.max_output_tokens_for_test(),
+            false,
         );
         assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_OUTPUT_TOKENS);
     }
@@ -759,6 +833,7 @@ mod tests {
             &[u("hi")],
             &[],
             a.max_output_tokens_for_test(),
+            false,
         );
         assert_eq!(body["max_tokens"], 32_000);
     }
@@ -771,5 +846,96 @@ mod tests {
             i,
             crate::SseItem::Stop(manch_protocol::acp::StopReason::MaxTokens)
         )));
+    }
+
+    fn sys(text: &str) -> Turn {
+        Turn {
+            role: Role::System,
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
+        }
+    }
+
+    #[test]
+    fn system_turns_are_hoisted_to_the_top_level_system_parameter() {
+        // Anthropic takes system content out-of-band, not as a message. Sent as
+        // a user message it is just more user text, with none of the authority
+        // the parameter carries.
+        let body = request_body(
+            "claude-opus-4-8",
+            &[sys("be careful"), u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
+        );
+        assert_eq!(body["system"][0]["text"], "be careful");
+        assert_eq!(
+            body["messages"].as_array().map(Vec::len),
+            Some(1),
+            "the system turn must not also appear as a message"
+        );
+        assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn a_system_turn_is_hoisted_from_wherever_it_appears() {
+        // Anthropic has no in-band position for it, so position cannot be
+        // honoured. Hoisting regardless is the documented rule.
+        let body = request_body(
+            "claude-opus-4-8",
+            &[u("hi"), sys("be careful")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
+        );
+        assert_eq!(body["system"][0]["text"], "be careful");
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_cache_breakpoint_marks_the_end_of_the_system_block() {
+        // Caching is a prefix match, so the breakpoint belongs at the end of the
+        // frozen prefix — which is exactly what a system block is.
+        let body = request_body(
+            "claude-opus-4-8",
+            &[sys("rule one"), sys("rule two"), u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            true,
+        );
+        let sys_blocks = body["system"].as_array().expect("system is an array");
+        assert_eq!(sys_blocks.len(), 2);
+        assert!(
+            sys_blocks[0].get("cache_control").is_none(),
+            "only the final block carries the breakpoint"
+        );
+        assert_eq!(sys_blocks[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn caching_is_off_unless_asked_for() {
+        let body = request_body(
+            "claude-opus-4-8",
+            &[sys("rule one"), u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            false,
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn no_system_turn_means_no_system_key_at_all() {
+        // An empty `system` is not the same fact to a model as no system prompt,
+        // and it would be a wasted key on every request that has none.
+        let body = request_body(
+            "claude-opus-4-8",
+            &[u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            true,
+        );
+        assert!(body.get("system").is_none());
     }
 }

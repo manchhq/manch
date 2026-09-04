@@ -247,21 +247,17 @@ impl Agent for AcpCliAgent {
         // Tool calls/results have no slot in ACP's role-less ContentBlock
         // vocabulary and don't apply on this path anyway (host tools are
         // BYOK-only — see crate docs), so only `Entry::Block` entries are sent.
-        let blocks = ctx
-            .turns
-            .into_iter()
-            .rev()
-            .find(|t| t.role == Role::User)
-            .map(|t| {
-                t.entries
-                    .into_iter()
-                    .filter_map(|e| match e {
-                        manch_protocol::Entry::Block(b) => Some(b),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        //
+        // `Role::System` is dropped here, and that is correct rather than an
+        // omission. ACP has no system role — its own `Role` is `User |
+        // Assistant` — and an external agent such as Claude Code or Codex owns
+        // its own system prompt, which a host driving it through Manch cannot
+        // and should not overwrite. Folding system content into the user turn
+        // instead would hand the host's standing rules exactly the authority of
+        // the text they exist to constrain, which is the bug `Role::System`
+        // was added to prevent. A host that needs guardrails on this path has
+        // to express them the way that agent supports.
+        let blocks = prompt_blocks(ctx.turns);
         let id = self.id;
         let policy = self.policy.clone();
 
@@ -602,5 +598,90 @@ mod tests {
         assert_eq!(tool_status(ToolCallStatus::Completed), "done");
         assert_eq!(tool_status(ToolCallStatus::Failed), "error");
         assert_eq!(tool_status(ToolCallStatus::InProgress), "running");
+    }
+}
+
+/// The content blocks sent to an external ACP agent: the entries of the most
+/// recent `Role::User` turn. Pure, so the selection rule is testable without a
+/// live agent connection.
+///
+/// See the call site for why `Role::System` is deliberately not folded in.
+fn prompt_blocks(turns: Vec<manch_protocol::Turn>) -> Vec<manch_protocol::acp::ContentBlock> {
+    turns
+        .into_iter()
+        .rev()
+        .find(|t| t.role == Role::User)
+        .map(|t| {
+            t.entries
+                .into_iter()
+                .filter_map(|e| match e {
+                    manch_protocol::Entry::Block(b) => Some(b),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod prompt_block_tests {
+    use manch_protocol::acp::{ContentBlock, TextContent};
+    use manch_protocol::{Entry, Role, Turn};
+
+    use super::prompt_blocks;
+
+    fn turn(role: Role, text: &str) -> Turn {
+        Turn {
+            role,
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
+        }
+    }
+
+    fn texts(blocks: &[ContentBlock]) -> Vec<String> {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_system_turn_is_not_sent_to_an_external_agent() {
+        // ACP has no system role, and an external agent (Claude Code, Codex)
+        // owns its own system prompt. Folding the host's standing rules into
+        // the user turn would hand them exactly the authority of the text they
+        // exist to constrain — the bug `Role::System` was added to prevent.
+        // The system turn sits *after* the user turn, which is the adversarial
+        // position for a reverse scan: anything that gathers blocks loosely
+        // picks it up first.
+        let blocks = prompt_blocks(vec![
+            turn(Role::User, "summarise this"),
+            turn(Role::System, "never invent citations"),
+        ]);
+        assert_eq!(texts(&blocks), vec!["summarise this".to_string()]);
+        assert!(
+            !texts(&blocks).iter().any(|t| t.contains("never invent")),
+            "system content must not reach an external agent as user input"
+        );
+    }
+
+    #[test]
+    fn only_the_trailing_user_turn_is_sent() {
+        let blocks = prompt_blocks(vec![
+            turn(Role::User, "first"),
+            turn(Role::Assistant, "reply"),
+            turn(Role::User, "second"),
+        ]);
+        assert_eq!(texts(&blocks), vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn a_history_with_no_user_turn_sends_nothing() {
+        let blocks = prompt_blocks(vec![turn(Role::System, "rules only")]);
+        assert!(blocks.is_empty());
     }
 }

@@ -240,6 +240,7 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
     let role = match turn.role {
         Role::User => "user",
         Role::Assistant => "assistant",
+        Role::System => "system",
     };
 
     let tool_calls: Vec<serde_json::Value> = turn
@@ -314,7 +315,21 @@ pub(crate) fn request_body(
     max_output_tokens: u32,
     id: &str,
 ) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = turns.iter().flat_map(turn_messages).collect();
+    // System messages first, whatever their position in the log.
+    //
+    // Position is load-bearing here in a way it is not for the other two.
+    // OpenAI-compatible providers cache *implicitly* on a prefix match, so
+    // there is no breakpoint to send — the only thing that makes a cache hit
+    // possible is putting stable content ahead of volatile content. That
+    // ordering is this crate's to guarantee; a host cannot reach past
+    // `Agent::prompt` to impose it.
+    let (system, rest): (Vec<&Turn>, Vec<&Turn>) =
+        turns.iter().partition(|t| t.role == Role::System);
+    let messages: Vec<serde_json::Value> = system
+        .into_iter()
+        .chain(rest)
+        .flat_map(turn_messages)
+        .collect();
     let mut body = serde_json::json!({
         "model": model,
         "stream": true,
@@ -990,5 +1005,32 @@ mod tests {
             i,
             crate::SseItem::Stop(manch_protocol::acp::StopReason::MaxTokens)
         )));
+    }
+
+    fn sys(text: &str) -> Turn {
+        Turn {
+            role: Role::System,
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
+        }
+    }
+
+    #[test]
+    fn a_system_turn_becomes_a_system_message_placed_first() {
+        // Position is not cosmetic here. OpenAI-compatible providers cache
+        // implicitly on a prefix match, so stable content ahead of volatile
+        // content is the only thing that makes a cache hit possible at all.
+        let body = request_body(
+            "gpt-5-chat-latest",
+            &[u("hi"), sys("be careful")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            "openai",
+        );
+        let msgs = body["messages"].as_array().expect("messages is an array");
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "be careful");
+        assert_eq!(msgs[1]["role"], "user");
     }
 }
