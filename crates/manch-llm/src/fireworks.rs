@@ -52,9 +52,9 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
 /// As [`list_models`], against an explicit base — a proxy in front of
 /// Fireworks, say.
 pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
-    crate::ensure_crypto_provider();
     let base = crate::resolve_base(ID, base, DEFAULT_BASE);
-    let resp = reqwest::Client::new()
+    let resp = crate::http::shared()
+        .client()
         .get(format!("{base}/models"))
         .bearer_auth(api_key)
         .send()

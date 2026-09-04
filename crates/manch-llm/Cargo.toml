@@ -24,6 +24,10 @@ futures-util = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 bytes = "1"
+# Only the timer, for retry backoff. reqwest already requires a tokio runtime
+# (its connect timeout is documented as needing one), so this adds no new
+# runtime assumption — just the ability to sleep between attempts.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }

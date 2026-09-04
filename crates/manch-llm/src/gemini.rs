@@ -8,7 +8,7 @@ use manch_protocol::{
     Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
 };
 
-use crate::{ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, token_count, turn_text};
+use crate::{ModelInfo, ModelKind, SseItem, token_count, turn_text};
 
 pub(crate) const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 // Stable alias — resolves to the current flash snapshot, so it won't rot like a
@@ -28,6 +28,7 @@ pub struct GeminiAgent {
     model: String,
     base: String,
     max_output_tokens: u32,
+    http: crate::http::Http,
 }
 
 impl GeminiAgent {
@@ -37,7 +38,32 @@ impl GeminiAgent {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
             base: crate::resolve_base("gemini", None, DEFAULT_BASE),
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            http: crate::http::Http::default(),
         }
+    }
+    /// Time allowed to establish a connection. See
+    /// [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT).
+    #[must_use]
+    pub fn connect_timeout(mut self, d: std::time::Duration) -> Self {
+        self.http = self.http.with_connect_timeout(d);
+        self
+    }
+
+    /// Maximum time between two reads on a live response — a stall detector,
+    /// not a deadline for the turn. See
+    /// [`DEFAULT_READ_TIMEOUT`](crate::DEFAULT_READ_TIMEOUT).
+    #[must_use]
+    pub fn read_timeout(mut self, d: std::time::Duration) -> Self {
+        self.http = self.http.with_read_timeout(d);
+        self
+    }
+
+    /// Retries after the first attempt, on 429 and 5xx. `0` disables retrying.
+    /// See [`DEFAULT_MAX_RETRIES`](crate::DEFAULT_MAX_RETRIES).
+    #[must_use]
+    pub fn max_retries(mut self, n: u32) -> Self {
+        self.http = self.http.with_max_retries(n);
+        self
     }
 
     /// Cap the model's output, in tokens. Defaults to
@@ -399,9 +425,9 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
 /// As [`list_models`], against an explicit base (falling back to the env
 /// override, then the vendor default).
 pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
-    ensure_crypto_provider();
     let base = crate::resolve_base("gemini", base, DEFAULT_BASE);
-    let resp = reqwest::Client::new()
+    let resp = crate::http::shared()
+        .client()
         .get(models_url(&base))
         .header("x-goog-api-key", api_key)
         .send()
@@ -421,14 +447,16 @@ impl Agent for GeminiAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
-        ensure_crypto_provider();
-        let resp = reqwest::Client::new()
-            .post(stream_url(&self.base, &self.model))
-            .header("x-goog-api-key", &self.api_key)
-            .json(&request_body(&ctx.turns, tools, self.max_output_tokens))
-            .send()
-            .await
-            .map_err(err)?;
+        let resp = self
+            .http
+            .send(
+                self.http
+                    .client()
+                    .post(stream_url(&self.base, &self.model))
+                    .header("x-goog-api-key", &self.api_key)
+                    .json(&request_body(&ctx.turns, tools, self.max_output_tokens)),
+            )
+            .await?;
 
         if !resp.status().is_success() {
             return Err(crate::http_error("gemini", resp).await);
