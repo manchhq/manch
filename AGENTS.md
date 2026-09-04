@@ -64,7 +64,7 @@ Always prefer the `just` recipes over raw `cargo`/`pnpm` so you run exactly what
   - `pre-commit` → `just fmt-check` + `just lint` (must be formatted and typecheck-clean).
   - `pre-push` → `just clippy` + `just test` + `just build-js`.
   - Don't bypass with `--no-verify` unless you know why.
-- **Conventional Commits** — subjects like `feat:`, `fix:`, `chore:`, `ci:`, `build:`, `test:`, `docs:`. `release-plz` derives versions and changelogs from them, so they matter.
+- **Conventional Commits** — subjects like `feat:`, `fix:`, `chore:`, `ci:`, `build:`, `test:`, `docs:`. `release-plz` will derive versions and changelogs from them when releasing is unparked, so they still matter.
 - **Clippy is `-D warnings`** and **rustfmt is enforced** — keep both clean.
 - **After editing `proto/`** (or before touching TS that imports `@manch/api`), run `just gen`.
 - **`Cargo.lock` is committed** — keep it in sync; the Docker/CI builds use `--locked`.
@@ -75,7 +75,7 @@ Manch **speaks ACP's vocabulary; it does not reinvent it.** Content blocks, tool
 
 ## Versioning & releases (don't hand-edit)
 
-- `manch-protocol` is versioned **independently** and published to crates.io by `release-plz` on merge to `main`.
+- `manch-protocol` is versioned **independently** and *will be* published to crates.io by `release-plz`. **Nothing is published yet, and the workflow is parked** (manual `workflow_dispatch` only) until a real consumer has exercised the crate surface at runtime — see [#34](https://github.com/manchhq/manch/issues/34), and the header of `.github/workflows/release-plz.yml` for how to unpark it.
 - `manch-server` and `manch-desktop` are products (`publish = false`); they ship on a `v*` git tag — desktop installers via `tauri-action`, server as a Docker image on GHCR (`ghcr.io/manchhq/manch-server`).
 - Let `release-plz` manage version bumps; don't bump crate versions by hand.
 

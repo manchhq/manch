@@ -1,8 +1,29 @@
 name: release-plz
 
+# PARKED — manual only, deliberately not on push.
+#
+# Nothing is being released until NyayVaani and/or pi_dx ship and a real
+# consumer has exercised the crate surface at runtime (#34). Until then this
+# ran on every merge to `main` and failed on every one of them, leaving a
+# `release-plz-*` branch behind each time.
+#
+# Two separate reasons it could not have worked anyway, both still true:
+#
+#   1. The repository has `can_approve_pull_request_reviews: false`, so the
+#      Actions token cannot open the release PR — the 403 in #36. Fixing it is
+#      one toggle: Settings → Actions → General → Workflow permissions →
+#      "Allow GitHub Actions to create and approve pull requests". It may also
+#      be pinned at the org level, which the repo toggle cannot override.
+#   2. `CARGO_REGISTRY_TOKEN` has never published anything, so the publish leg
+#      is unverified.
+#
+# To unpark: fix (1), then swap `workflow_dispatch` below back to
+#   push:
+#     branches: [main]
+# Nothing else here needs to change — the job is left intact on purpose so
+# unparking is a two-line edit rather than an archaeology exercise.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
