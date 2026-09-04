@@ -257,10 +257,14 @@ pub(crate) fn request_body(
     let contents: Vec<serde_json::Value> = turns
         .iter()
         .enumerate()
+        .filter(|(_, t)| t.role != Role::System)
         .map(|(i, t)| {
             let role = match t.role {
                 Role::User => "user",
                 Role::Assistant => "model",
+                // Filtered out above: Gemini carries system content in its own
+                // `systemInstruction` field, not as a `contents` entry.
+                Role::System => unreachable!("system turns are hoisted"),
             };
             serde_json::json!({ "role": role, "parts": turn_parts(t, turns, i) })
         })
@@ -272,6 +276,17 @@ pub(crate) fn request_body(
         // inconsistency that made this hard to attribute from outside.
         "generationConfig": { "maxOutputTokens": max_output_tokens },
     });
+    // Hoisted regardless of position, for the same reason as Anthropic: there
+    // is no in-band slot for it, so a mid-conversation system turn has no
+    // natural home.
+    let system: Vec<serde_json::Value> = turns
+        .iter()
+        .filter(|t| t.role == Role::System)
+        .map(|t| serde_json::json!({ "text": turn_text(t) }))
+        .collect();
+    if !system.is_empty() {
+        body["systemInstruction"] = serde_json::json!({ "parts": system });
+    }
     if !tools.is_empty() {
         body["tools"] = tools_json(tools);
     }
@@ -977,5 +992,36 @@ mod tests {
             i,
             crate::SseItem::Stop(manch_protocol::acp::StopReason::EndTurn)
         )));
+    }
+
+    fn sys(text: &str) -> Turn {
+        Turn {
+            role: Role::System,
+            entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                text.to_string(),
+            )))],
+        }
+    }
+
+    #[test]
+    fn system_turns_become_system_instruction_not_contents() {
+        let body = request_body(
+            &[sys("be careful"), u("hi")],
+            &[],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS,
+        );
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be careful");
+        assert_eq!(
+            body["contents"].as_array().map(Vec::len),
+            Some(1),
+            "the system turn must not also appear in contents"
+        );
+        assert_eq!(body["contents"][0]["role"], "user");
+    }
+
+    #[test]
+    fn no_system_turn_means_no_system_instruction_key() {
+        let body = request_body(&[u("hi")], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+        assert!(body.get("systemInstruction").is_none());
     }
 }

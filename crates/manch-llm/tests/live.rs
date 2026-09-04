@@ -621,3 +621,52 @@ async fn gemini_reports_max_tokens_when_the_cap_cuts_a_turn_off() {
          exactly the silent truncation #64 is about"
     );
 }
+
+// ---------------------------------------------------------------------------
+// System role: an instruction sent as a system turn has to actually bind.
+//
+// A unit test can only prove the JSON has a `systemInstruction` key. Whether
+// the provider *honours* it — rather than ignoring an unrecognised field and
+// returning a cheerful 200 — is a different property, and the one that matters.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_obeys_a_system_turn_over_the_users_question() {
+    let sink = Arc::new(Collector::default());
+    let ctx = Context {
+        session_id: "live-system".to_string(),
+        turns: vec![
+            Turn {
+                role: Role::System,
+                entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                    "You must answer every question with exactly the single word: BANANA"
+                        .to_string(),
+                )))],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::Block(ContentBlock::Text(TextContent::new(
+                    "What is the capital of France?".to_string(),
+                )))],
+            },
+        ],
+    };
+
+    GeminiAgent::new(key("GEMINI_API_KEY"), None)
+        .prompt(ctx, &[], sink.clone())
+        .await
+        .expect("gemini: prompt failed");
+
+    let text = sink.text().to_uppercase();
+    // "Paris" is the answer to the user's question; "BANANA" is only reachable
+    // if the system turn arrived *and* outranked it.
+    assert!(
+        text.contains("BANANA"),
+        "the system turn did not bind — got {text:?}"
+    );
+    assert!(
+        !text.contains("PARIS"),
+        "the model answered the question instead of obeying the system turn: {text:?}"
+    );
+}

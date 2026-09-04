@@ -113,10 +113,28 @@ pub enum Error {
 /// Convenience alias for fallible Manch operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Who authored a stored entry.
+///
+/// Deliberately **not** `#[non_exhaustive]`, unlike [`AgentEvent`] and
+/// [`Error`]. Every provider module matches this exhaustively to decide how a
+/// role reaches the wire, and that is the point: a role nobody has mapped must
+/// fail to compile rather than fall through a wildcard into whatever the
+/// catch-all does. Adding `System` broke exactly three matches, one per
+/// provider, and each had to make a decision — which is the behaviour worth
+/// keeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
+    /// A host's standing instructions — persona, rules, output contracts.
+    ///
+    /// Separate from [`Role::User`] because every provider treats system
+    /// content as more authoritative than user content, and because it is the
+    /// only part of a request that is stable enough to cache. Sending it as a
+    /// user turn (which was the only option before) collapses both properties:
+    /// the host's rules arrive carrying exactly the authority of the text they
+    /// are supposed to constrain.
+    System,
 }
 
 /// Context assembled by a [`MemoryStore`] and handed to an [`Agent`] for a turn.

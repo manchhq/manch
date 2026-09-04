@@ -123,4 +123,28 @@ mod tests {
             "text and tool call are one assistant turn"
         );
     }
+
+    #[test]
+    fn a_system_run_never_absorbs_the_user_turn_beside_it() {
+        // The fold merges runs of the *same* role, so this already holds — but
+        // it is the property that makes a system prompt worth having, so it is
+        // pinned rather than assumed. If system content merged into the user's
+        // turn it would arrive carrying the user's authority, which is the bug
+        // `Role::System` exists to prevent.
+        use crate::acp::TextContent;
+        let b = |s: &str| Entry::Block(ContentBlock::Text(TextContent::new(s.to_string())));
+        let turns = coalesce_turns(vec![
+            (Role::System, b("you are a careful lawyer")),
+            (Role::System, b("never invent citations")),
+            (Role::User, b("summarise this")),
+        ]);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, Role::System);
+        assert_eq!(
+            turns[0].entries.len(),
+            2,
+            "adjacent system entries coalesce"
+        );
+        assert_eq!(turns[1].role, Role::User);
+    }
 }
