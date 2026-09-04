@@ -118,6 +118,27 @@ fn refusal() -> acp::ToolCallContent {
     )))
 }
 
+/// The `ToolResult` content recorded when a call could not succeed.
+///
+/// Same invariant as [`refusal`] — a `tool_use` with no matching `tool_result`
+/// is invalid history, so the model must see *something* addressed to the call
+/// id. Unlike a refusal, this is also the model's only chance to learn *why*
+/// and try again, so the reason travels with it.
+fn failure(reason: &str) -> acp::ToolCallContent {
+    acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::Text(
+        acp::TextContent::new(format!("This tool call failed: {reason}")),
+    )))
+}
+
+/// The reason recorded for a call whose arguments never parsed.
+///
+/// `manch-llm` degrades an unparsable streamed accumulation to
+/// `serde_json::Value::Null` rather than aborting the stream. `Null` is not a
+/// value a model can send as an argument object, so it is an unambiguous
+/// sentinel — which is why this can be detected here without widening
+/// `ToolInvocation` or `ToolAccum::apply`'s return type.
+const UNREADABLE_ARGUMENTS: &str = "its arguments were not valid JSON and could not be read. Reissue the call with      well-formed JSON arguments.";
+
 /// Report a host tool's progress in ACP's own `ToolCallUpdate` vocabulary, so a
 /// UI renders host-registered tools exactly as it renders an ACP agent's own.
 async fn report(
@@ -178,9 +199,26 @@ pub(crate) async fn execute(
             buf.record(inv, vec![content]);
             Ok(())
         }
+        // A tool that errors is information for the model, not a host fault:
+        // it is the same situation as a refused permission, which is already
+        // recorded as a `ToolResult` rather than ending the turn. Reporting
+        // `Failed` to the sink keeps the UI (and the host) informed; the reason
+        // additionally goes back to the model so it can retry or explain.
+        //
+        // Errors from `report` itself still propagate — a sink that cannot be
+        // written to is a host fault, and nothing can be fed back through it.
         Err(e) => {
-            report(sink, inv, kind, acp::ToolCallStatus::Failed, None).await?;
-            Err(e)
+            let content = failure(&e.to_string());
+            report(
+                sink,
+                inv,
+                kind,
+                acp::ToolCallStatus::Failed,
+                Some(vec![content.clone()]),
+            )
+            .await?;
+            buf.record(inv, vec![content]);
+            Ok(())
         }
     }
 }
@@ -270,6 +308,23 @@ impl Manch {
         for inv in calls {
             let tool = self.tool_for(&inv)?;
             let cx = ToolContext::new(session_id, &inv.id, ext.clone());
+            // Checked before the tier split on purpose: a `Draft` call whose
+            // arguments are unreadable must not reach a human either. Asking
+            // someone to approve an action nobody can describe is worse than
+            // not asking, and `propose` would be rendering `null`.
+            if inv.arguments.is_null() {
+                let content = failure(UNREADABLE_ARGUMENTS);
+                report(
+                    sink,
+                    &inv,
+                    tool.schema().kind,
+                    acp::ToolCallStatus::Failed,
+                    Some(vec![content.clone()]),
+                )
+                .await?;
+                buf.record(&inv, vec![content]);
+                continue;
+            }
             match tool.tier() {
                 Tier::Read => execute(tool.as_ref(), &cx, &inv, sink, buf).await?,
                 Tier::Draft => match self.policy.decide(&cx, &inv).await? {
@@ -667,13 +722,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_mid_batch_failure_appends_nothing_from_that_batch() {
-        // Two calls in one turn; the second fails. The first must leave no record.
-        let (m, _log, store) = manch_with_failing_second_call();
-        let _ = m
+    async fn a_mid_batch_error_appends_nothing_from_that_batch() {
+        // The atomicity invariant, unchanged: when a call in a batch raises an
+        // error the turn cannot answer, the whole batch is discarded so no
+        // `tool_use` is persisted without its `tool_result`.
+        //
+        // The vehicle changed, though. This used to use a *failing tool*, which
+        // no longer errors — a tool failure is now answered and fed back (#38).
+        // An unregistered tool name still errors, because the model named
+        // something that was never offered and there is no call to answer.
+        let store = Arc::new(MemStore::new());
+        let m = Manch::builder()
+            .agent(Arc::new(ScriptAgent::new(
+                "a",
+                vec![vec![
+                    tool_call("c1", "list_appointments", json!({})),
+                    tool_call("c2", "ghost", json!({})),
+                ]],
+            )))
+            .tool(Arc::new(EchoTool::new(
+                "list_appointments",
+                Tier::Read,
+                Arc::new(Mutex::new(Vec::new())),
+            )))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+
+        let err = m
             .handle("a", "s", user_msg("go"), ext(), sink())
             .await
             .unwrap_err();
+        assert!(matches!(err, manch_protocol::Error::NotFound(n) if n == "ghost"));
+
         let ctx = store.assemble_context("s").await.unwrap();
         assert!(
             !ctx.turns
@@ -681,6 +762,34 @@ mod tests {
                 .flat_map(|t| &t.entries)
                 .any(|e| matches!(e, Entry::ToolResult { .. })),
             "buffered results are discarded when any call in the batch errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mid_batch_tool_failure_records_both_calls_rather_than_discarding() {
+        // The other half of the same invariant. Now that a tool failure is
+        // answered instead of raised, every call in the batch ends up with a
+        // result — the success *and* the failure — so history stays valid and
+        // the model can see exactly which call went wrong.
+        let (m, _log, store) = manch_with_failing_second_call();
+        m.handle("a", "s", user_msg("go"), ext(), sink())
+            .await
+            .expect("a failing tool no longer ends the turn");
+
+        let ctx = store.assemble_context("s").await.unwrap();
+        let results: Vec<_> = ctx
+            .turns
+            .iter()
+            .flat_map(|t| &t.entries)
+            .filter_map(|e| match e {
+                Entry::ToolResult { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results,
+            vec!["c1".to_string(), "c2".to_string()],
+            "both calls must be answered, in issue order"
         );
     }
 

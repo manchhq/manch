@@ -205,6 +205,14 @@ impl ToolAccum {
 /// `AgentEvent` has no error variant to carry a parse failure through, so it
 /// degrades to `Value::Null` rather than aborting the stream over one
 /// unparsable call.
+///
+/// **`Null` is load-bearing.** `manch-core` reads it as "these arguments never
+/// parsed" and answers the call with an error the model can act on instead of
+/// dispatching it (`dispatch::UNREADABLE_ARGUMENTS`). It works as a sentinel
+/// precisely because no model can send `null` as an argument *object* — which
+/// is also why `{}` was rejected as the degrade target: `{}` is valid arguments
+/// for a zero-argument tool, so degrading garbage to it would execute a call
+/// nobody could read. Changing this value silently re-enables that.
 fn parse_tool_arguments(json: &str) -> serde_json::Value {
     if json.trim().is_empty() {
         return serde_json::json!({});
