@@ -493,3 +493,38 @@ async fn gemini_receives_an_image_block() {
     let agent = GeminiAgent::new(key("GEMINI_API_KEY"), None);
     assert_an_image_reaches_the_model(agent, "gemini").await;
 }
+
+// ---------------------------------------------------------------------------
+// Catalogue: a provider's model list has to survive parsing.
+//
+// Unit tests pin the parser against a captured body, which cannot catch the
+// failure that actually shipped — Fireworks borrowed OpenAI's parser, whose id
+// heuristic matched none of its ids, so a perfectly healthy 200 with 25 models
+// in it silently became a one-element fallback list.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "live: needs FIREWORKS_API_KEY"]
+async fn fireworks_returns_its_real_catalogue_not_just_the_fallback() {
+    let models = manch_llm::fireworks::list_models(&key("FIREWORKS_API_KEY"))
+        .await
+        .expect("fireworks: list_models failed");
+
+    assert!(
+        models.len() > 1,
+        "fireworks: got {} model(s) — a single entry means the catalogue was \
+         filtered away and the fallback substituted, not that the account has \
+         one model",
+        models.len()
+    );
+    assert!(
+        models.iter().any(|m| m.context_window.is_some()),
+        "fireworks: not one model reported a context window, so the capability \
+         fields are being parsed away"
+    );
+    assert!(
+        models.iter().any(|m| m.supports_image_input == Some(true)),
+        "fireworks: no vision-capable model found; the catalogue advertises \
+         several, so this flag is not surviving the parse"
+    );
+}

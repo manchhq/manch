@@ -10,6 +10,17 @@ import type { Workspace, CreateWorkspace, Team, CreateTeam, TeamRun, Schedule, C
 export interface ModelInfo {
   id: string;
   display_name: string | null;
+  /**
+   * Capability, as published by the provider. `null` means *unknown*, not
+   * `false` — providers disagree about what they expose, and a picker that
+   * treats "not told" as "cannot" will hide models that work.
+   */
+  context_window: number | null;
+  max_output_tokens: number | null;
+  supports_tools: boolean | null;
+  supports_image_input: boolean | null;
+  reasoning: boolean | null;
+  kind: "chat" | "embedding" | "image" | null;
 }
 
 export const saveApiKey = (provider: Provider, apiKey: string): Promise<void> =>

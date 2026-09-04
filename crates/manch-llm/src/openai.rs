@@ -8,7 +8,7 @@ use manch_protocol::{
     Agent, Context, Entry, EventSink, Result, Role, ToolInvocation, ToolSchema, Turn,
 };
 
-use crate::{ModelInfo, SseItem, ensure_crypto_provider, err, token_count, turn_text};
+use crate::{ModelInfo, ModelKind, SseItem, ensure_crypto_provider, err, token_count, turn_text};
 
 pub(crate) const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 // Stable chat alias — resolves to the current GPT-5 chat snapshot and works with
@@ -371,8 +371,11 @@ pub(crate) fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
                 .filter_map(|m| {
                     let id = m.get("id")?.as_str()?;
                     is_chat_model(id).then(|| ModelInfo {
-                        id: id.to_string(),
-                        display_name: None,
+                        // `/v1/models` carries no capability field whatsoever;
+                        // `kind` is asserted only because `is_chat_model` has
+                        // already curated the list down to chat families.
+                        kind: Some(ModelKind::Chat),
+                        ..ModelInfo::new(id)
                     })
                 })
                 .collect()
@@ -773,5 +776,14 @@ mod tests {
     fn a_text_only_turn_still_serialises_content_as_a_bare_string() {
         let body = request_body("gpt-5-chat-latest", &[u("hi")], &[]);
         assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn openai_capabilities_read_as_unknown_not_false() {
+        let body = serde_json::json!({ "data": [{ "id": "gpt-5" }] });
+        let m = &parse_models(&body)[0];
+        assert_eq!(m.supports_tools, None);
+        assert_eq!(m.context_window, None);
+        assert_eq!(m.kind, Some(ModelKind::Chat));
     }
 }
