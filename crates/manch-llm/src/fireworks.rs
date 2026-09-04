@@ -25,7 +25,13 @@ pub const ID: &str = "fireworks";
 /// here — Fireworks addresses models by account-qualified path — so a
 /// compatible provider without its own default builds an agent that 404s on
 /// first use.
-pub const FALLBACK_MODEL: &str = "accounts/fireworks/models/kimi-k2-instruct";
+///
+/// **Verified against the live catalogue** (`GET {DEFAULT_BASE}/models`,
+/// 2026-09-03), which is the only way to get this right: the first value
+/// written here was `kimi-k2-instruct`, a plausible id that does not exist.
+/// That is precisely the failure this module exists to prevent, so the id is
+/// checked against the catalogue rather than inferred from a naming pattern.
+pub const FALLBACK_MODEL: &str = "accounts/fireworks/models/kimi-k3";
 
 /// A Fireworks agent. Reads `MANCH_FIREWORKS_BASE_URL` when set, independently
 /// of `MANCH_OPENAI_BASE_URL`, so pointing OpenAI at a proxy does not silently
