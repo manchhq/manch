@@ -150,6 +150,45 @@ fn tool_result_text(content: &[ToolCallContent]) -> String {
         .join("\n")
 }
 
+/// A turn's `content` value: the bare string OpenAI has always been sent when
+/// every content block is text, or an array of typed parts once the turn
+/// carries a non-text block.
+///
+/// The API accepts both shapes, so the string is kept for the common case
+/// deliberately — switching every existing request to an array to enable a rare
+/// one would be a regression surface for no gain.
+///
+/// `ContentBlock::Audio` and the two resource variants are still dropped:
+/// Chat Completions encodes audio as `input_audio` with a bare format name
+/// (`"wav"`, `"mp3"`), not a MIME type, so mapping it is a different problem
+/// than this one and inventing the translation here would be a guess.
+fn turn_content(turn: &Turn) -> serde_json::Value {
+    let has_non_text_block = turn
+        .entries
+        .iter()
+        .any(|e| matches!(e, Entry::Block(b) if !matches!(b, ContentBlock::Text(_))));
+    if !has_non_text_block {
+        return serde_json::Value::String(turn_text(turn));
+    }
+    serde_json::Value::Array(
+        turn.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Block(ContentBlock::Text(t)) => {
+                    Some(serde_json::json!({ "type": "text", "text": t.text }))
+                }
+                // Chat Completions takes an image as a URL, and a data URL is
+                // how base64 bytes become one.
+                Entry::Block(ContentBlock::Image(i)) => Some(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{};base64,{}", i.mime_type, i.data) },
+                })),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
 /// Map one turn onto the OpenAI message(s) it becomes. Usually one message,
 /// but a turn holding tool results expands to one `tool`-role message per
 /// result, since each carries its own `tool_call_id` — OpenAI has no
@@ -196,7 +235,7 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
         messages.push(serde_json::json!({
             "role": "assistant",
             "content": if has_block {
-                serde_json::Value::String(turn_text(turn))
+                turn_content(turn)
             } else {
                 serde_json::Value::Null
             },
@@ -215,7 +254,7 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
     }
 
     if (has_block && !absorbed) || messages.is_empty() {
-        messages.push(serde_json::json!({ "role": role, "content": turn_text(turn) }));
+        messages.push(serde_json::json!({ "role": role, "content": turn_content(turn) }));
     }
 
     messages
@@ -417,7 +456,7 @@ impl Agent for OpenAiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use manch_protocol::acp::{ContentBlock, TextContent};
+    use manch_protocol::acp::{ContentBlock, ImageContent, TextContent};
     use manch_protocol::{Entry, Role, ToolInvocation, Turn};
 
     fn u(text: &str) -> Turn {
@@ -697,5 +736,42 @@ mod tests {
     fn new_uses_fallback_when_model_none() {
         let a = OpenAiAgent::new("k".into(), None);
         assert_eq!(a.model, FALLBACK_MODEL);
+    }
+
+    #[test]
+    fn an_image_block_reaches_openai_as_a_data_url_image_part() {
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new(
+                    "read this".to_string(),
+                ))),
+                Entry::Block(ContentBlock::Image(ImageContent::new(
+                    "AAAA".to_string(),
+                    "image/png".to_string(),
+                ))),
+            ],
+        };
+        let body = request_body("gpt-5-chat-latest", &[turn], &[]);
+        let content = &body["messages"][0]["content"];
+        assert_eq!(
+            content[0],
+            serde_json::json!({ "type": "text", "text": "read this" })
+        );
+        assert_eq!(
+            content[1],
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,AAAA" },
+            })
+        );
+    }
+
+    /// Regression guard, not a RED test: OpenAI accepts both a bare string and a
+    /// parts array, and every existing all-text call must keep the string.
+    #[test]
+    fn a_text_only_turn_still_serialises_content_as_a_bare_string() {
+        let body = request_body("gpt-5-chat-latest", &[u("hi")], &[]);
+        assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
     }
 }

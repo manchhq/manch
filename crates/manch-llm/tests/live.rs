@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use manch_llm::{AnthropicAgent, GeminiAgent, OpenAiAgent};
 use manch_protocol::acp::{
-    Content, ContentBlock, SessionUpdate, TextContent, ToolCallContent, ToolKind,
+    Content, ContentBlock, ImageContent, SessionUpdate, TextContent, ToolCallContent, ToolKind,
 };
 use manch_protocol::{
     Agent, AgentEvent, Context, Entry, EventSink, Result, Role, ToolSchema, Turn,
@@ -417,4 +417,79 @@ async fn gemini_completes_a_two_turn_loop_with_parallel_calls() {
         .await
         .unwrap_or_else(|e| panic!("gemini: SECOND turn failed with parallel calls — {e}"));
     assert!(!second.text().trim().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Vision: an image block has to survive the trip to the provider.
+//
+// The encoding half of this is unit-tested per provider, but "we serialised a
+// data URL" and "the model saw pixels" are the same two different properties
+// this file exists to separate — a provider that ignores an unrecognised
+// content part returns a perfectly successful 200 describing nothing.
+// ---------------------------------------------------------------------------
+
+/// A 16×16 solid crimson PNG. Inline rather than a fixture file so the test is
+/// self-contained and the bytes cannot drift.
+const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR42mO4IyJCEmIY1TCqYfhqAAACcQQQFd0BdQAAAABJRU5ErkJggg==";
+
+/// One user turn carrying prose *and* an image, which is the ordering a real
+/// OCR prompt has: an instruction, then the page it applies to.
+fn ask_about_the_image(prompt: &str) -> Context {
+    Context {
+        session_id: "live-vision".to_string(),
+        turns: vec![Turn {
+            role: Role::User,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new(prompt.to_string()))),
+                Entry::Block(ContentBlock::Image(ImageContent::new(
+                    RED_PNG_B64.to_string(),
+                    "image/png".to_string(),
+                ))),
+            ],
+        }],
+    }
+}
+
+/// Asking for the colour is the cheapest question a model cannot answer without
+/// the pixels: a turn where the image was silently dropped either errors or
+/// answers about nothing, and neither one says "red".
+async fn assert_an_image_reaches_the_model(agent: impl Agent, provider: &str) {
+    let sink = Arc::new(Collector::default());
+    agent
+        .prompt(
+            ask_about_the_image(
+                "What colour is this image? Answer with a single word, no punctuation.",
+            ),
+            &[],
+            sink.clone(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{provider}: prompt failed — {e}"));
+
+    let text = sink.text().to_lowercase();
+    assert!(
+        text.contains("red") || text.contains("crimson"),
+        "{provider}: the model did not describe the image it was sent — got {text:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live: needs ANTHROPIC_API_KEY"]
+async fn anthropic_receives_an_image_block() {
+    let agent = AnthropicAgent::new(key("ANTHROPIC_API_KEY"), None);
+    assert_an_image_reaches_the_model(agent, "anthropic").await;
+}
+
+#[tokio::test]
+#[ignore = "live: needs OPENAI_API_KEY"]
+async fn openai_receives_an_image_block() {
+    let agent = OpenAiAgent::new(key("OPENAI_API_KEY"), None);
+    assert_an_image_reaches_the_model(agent, "openai").await;
+}
+
+#[tokio::test]
+#[ignore = "live: needs GEMINI_API_KEY"]
+async fn gemini_receives_an_image_block() {
+    let agent = GeminiAgent::new(key("GEMINI_API_KEY"), None);
+    assert_an_image_reaches_the_model(agent, "gemini").await;
 }

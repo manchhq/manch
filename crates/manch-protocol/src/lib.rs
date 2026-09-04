@@ -64,7 +64,7 @@ use serde::{Deserialize, Serialize};
 /// does not define parallel content/event enums.
 pub mod acp {
     pub use agent_client_protocol::schema::v1::{
-        Content, ContentBlock, ContentChunk, PermissionOption, PermissionOptionId,
+        Content, ContentBlock, ContentChunk, ImageContent, PermissionOption, PermissionOptionId,
         PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
         RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
         SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,

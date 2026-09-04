@@ -105,16 +105,29 @@ fn tool_result_content_json(content: &[ToolCallContent]) -> serde_json::Value {
     )
 }
 
-/// Map one turn entry onto an Anthropic content block. `Entry::Block` covers
-/// only text (as `turn_text` already did — a non-text block is not yet
-/// mapped); `Entry::ToolCall` becomes a `tool_use` block and `Entry::ToolResult`
-/// a `tool_result` block, the pairing Anthropic requires to accept a second
-/// loop iteration built from stored history.
+/// Map one turn entry onto an Anthropic content block. `Entry::ToolCall`
+/// becomes a `tool_use` block and `Entry::ToolResult` a `tool_result` block,
+/// the pairing Anthropic requires to accept a second loop iteration built from
+/// stored history.
+///
+/// `ContentBlock::Audio` and the two resource variants are still dropped:
+/// Anthropic's Messages API has no input encoding for them, so there is nothing
+/// truthful to map them onto. They are the only kinds that vanish here.
 fn entry_json(entry: &Entry) -> Option<serde_json::Value> {
     match entry {
         Entry::Block(ContentBlock::Text(t)) => {
             Some(serde_json::json!({ "type": "text", "text": t.text }))
         }
+        // ACP hands us base64 + a MIME type, which is exactly the pair
+        // Anthropic's `base64` source wants — no transcoding in between.
+        Entry::Block(ContentBlock::Image(i)) => Some(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": i.mime_type,
+                "data": i.data,
+            },
+        })),
         Entry::Block(_) => None,
         Entry::ToolCall(ToolInvocation {
             id,
@@ -325,7 +338,7 @@ impl Agent for AnthropicAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use manch_protocol::acp::{ContentBlock, TextContent};
+    use manch_protocol::acp::{ContentBlock, ImageContent, TextContent};
     use manch_protocol::{Entry, Role, Turn};
 
     fn u(text: &str) -> Turn {
@@ -528,5 +541,44 @@ mod tests {
     fn new_uses_fallback_when_model_none() {
         let a = AnthropicAgent::new("k".into(), None);
         assert_eq!(a.model, FALLBACK_MODEL);
+    }
+
+    fn image(mime: &str, data: &str) -> Entry {
+        Entry::Block(ContentBlock::Image(ImageContent::new(
+            data.to_string(),
+            mime.to_string(),
+        )))
+    }
+
+    #[test]
+    fn an_image_block_reaches_anthropic_as_a_base64_image_source() {
+        let turn = Turn {
+            role: Role::User,
+            entries: vec![
+                Entry::Block(ContentBlock::Text(TextContent::new(
+                    "read this".to_string(),
+                ))),
+                image("image/png", "AAAA"),
+            ],
+        };
+        let body = request_body("claude-opus-4-8", &[turn], &[]);
+        let content = &body["messages"][0]["content"];
+        // The prose alongside the image must survive as well.
+        assert_eq!(content[0]["text"], "read this");
+        assert_eq!(
+            content[1],
+            serde_json::json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" },
+            })
+        );
+    }
+
+    /// Regression guard, not a RED test: an all-text turn must keep serialising
+    /// as a bare string, byte for byte as before multimodal support landed.
+    #[test]
+    fn a_text_only_turn_still_serialises_as_a_bare_string() {
+        let body = request_body("claude-opus-4-8", &[u("hi")], &[]);
+        assert_eq!(body["messages"][0]["content"], serde_json::json!("hi"));
     }
 }
