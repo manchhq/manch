@@ -371,7 +371,7 @@ just --list    # see all recipes
 ```
 
 Git hooks (via Lefthook) run `fmt` + `lint` on commit and `clippy` + tests on push.
-`manch-protocol` is published to crates.io by release-plz on merge to `main`.
+`manch-protocol` will be published to crates.io by release-plz. Nothing is published yet: the workflow is parked (manual trigger only) until a consumer has exercised the crate surface at runtime.
 Tagging `vX.Y.Z` builds desktop installers and the server Docker image
 (`ghcr.io/manchhq/manch-server`).
 
