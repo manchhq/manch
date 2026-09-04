@@ -19,6 +19,11 @@ pub struct OpenAiAgent {
     api_key: String,
     model: String,
     base: String,
+    /// What this agent calls itself. `"openai"` for the vendor; an
+    /// OpenAI-compatible provider built through [`OpenAiAgent::compatible`]
+    /// reports its own id, so a host routing on `Agent::id` is not told
+    /// Fireworks is OpenAI.
+    id: &'static str,
 }
 
 impl OpenAiAgent {
@@ -27,6 +32,37 @@ impl OpenAiAgent {
             api_key,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_string()),
             base: crate::resolve_base("openai", None, DEFAULT_BASE),
+            id: "openai",
+        }
+    }
+
+    /// An **OpenAI-compatible** provider: same wire format, its own id, base
+    /// and default model. Fireworks, Together, Groq, OpenRouter and a local
+    /// vLLM all speak this dialect, and none of them serve OpenAI's catalogue
+    /// or answer to OpenAI's model ids.
+    ///
+    /// This exists so a *host* need not know any of that. Before it, a
+    /// consumer had to supply the base URL, hardcode a default model id in
+    /// its own crate (OpenAI's `gpt-5-chat-latest` 404s on Fireworks), and
+    /// remember that the catalogue needs redirecting too — three provider
+    /// facts leaking into product code. Which model suits which *task* is the
+    /// host's call; *which string names a model on Fireworks* is ours.
+    ///
+    /// `env_key` names the `MANCH_{KEY}_BASE_URL` override, so each compatible
+    /// provider is redirectable independently of OpenAI itself.
+    pub fn compatible(
+        id: &'static str,
+        env_key: &str,
+        api_key: String,
+        model: Option<String>,
+        default_base: &str,
+        fallback_model: &str,
+    ) -> Self {
+        Self {
+            api_key,
+            model: model.unwrap_or_else(|| fallback_model.to_string()),
+            base: crate::resolve_base(env_key, None, default_base),
+            id,
         }
     }
 
@@ -47,6 +83,21 @@ impl OpenAiAgent {
     pub fn base(&self) -> &str {
         &self.base
     }
+
+    /// The resolved model id. Test-only accessor: `model` is private and
+    /// `compatible`'s fallback behaviour is worth asserting from a sibling
+    /// module.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn model_for_test(&self) -> &str {
+        &self.model
+    }
+}
+
+/// Test-only: lets a sibling module assert its fallback is *not* this one.
+#[cfg(test)]
+pub(crate) fn fallback_model_for_test() -> &'static str {
+    FALLBACK_MODEL
 }
 
 /// `{base}/chat/completions`. Pure.
@@ -338,7 +389,7 @@ pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<Mod
 #[async_trait]
 impl Agent for OpenAiAgent {
     fn id(&self) -> &str {
-        "openai"
+        self.id
     }
 
     async fn prompt(

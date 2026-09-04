@@ -23,6 +23,10 @@ pub mod openai;
 #[cfg(feature = "openai")]
 pub use openai::OpenAiAgent;
 
+// Fireworks rides OpenAI's wire format, so it cannot be enabled without it.
+#[cfg(feature = "fireworks")]
+pub mod fireworks;
+
 /// A model advertised by a provider's list-models endpoint.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelInfo {
