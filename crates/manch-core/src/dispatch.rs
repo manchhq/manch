@@ -56,11 +56,17 @@ impl Buffer {
     /// — and Gemini rejects it outright, because it attaches a thought
     /// signature to only the *first* call of a batch, so a lone second call in
     /// a turn of its own has none.
-    pub(crate) fn record(&mut self, inv: &ToolInvocation, content: Vec<acp::ToolCallContent>) {
+    pub(crate) fn record(
+        &mut self,
+        inv: &ToolInvocation,
+        content: Vec<acp::ToolCallContent>,
+        raw_output: Option<serde_json::Value>,
+    ) {
         self.calls.push(Entry::ToolCall(inv.clone()));
         self.results.push(Entry::ToolResult {
             id: inv.id.clone(),
             content,
+            raw_output,
         });
     }
 
@@ -147,9 +153,10 @@ async fn report(
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
     content: Option<Vec<acp::ToolCallContent>>,
+    raw_output: Option<serde_json::Value>,
 ) -> Result<()> {
     sink.emit(AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(
-        update(inv, kind, status, content),
+        update(inv, kind, status, content, raw_output),
     )))
     .await
 }
@@ -160,6 +167,7 @@ fn update(
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
     content: Option<Vec<acp::ToolCallContent>>,
+    raw_output: Option<serde_json::Value>,
 ) -> acp::ToolCallUpdate {
     acp::ToolCallUpdate::new(
         inv.id.clone(),
@@ -168,7 +176,10 @@ fn update(
             .status(status)
             .title(inv.name.clone())
             .content(content)
-            .raw_input(inv.arguments.clone()),
+            // The input was already carried; the output was the half being
+            // dropped on the floor, which is what #73 was about.
+            .raw_input(inv.arguments.clone())
+            .raw_output(raw_output),
     )
 }
 
@@ -185,18 +196,19 @@ pub(crate) async fn execute(
     buf: &mut Buffer,
 ) -> Result<()> {
     let kind = tool.schema().kind;
-    report(sink, inv, kind, acp::ToolCallStatus::InProgress, None).await?;
+    report(sink, inv, kind, acp::ToolCallStatus::InProgress, None, None).await?;
     match tool.call(cx, inv.arguments.clone()).await {
-        Ok(content) => {
+        Ok(outcome) => {
             report(
                 sink,
                 inv,
                 kind,
                 acp::ToolCallStatus::Completed,
-                Some(vec![content.clone()]),
+                Some(outcome.content.clone()),
+                outcome.raw_output.clone(),
             )
             .await?;
-            buf.record(inv, vec![content]);
+            buf.record(inv, outcome.content, outcome.raw_output);
             Ok(())
         }
         // A tool that errors is information for the model, not a host fault:
@@ -215,9 +227,10 @@ pub(crate) async fn execute(
                 kind,
                 acp::ToolCallStatus::Failed,
                 Some(vec![content.clone()]),
+                None,
             )
             .await?;
-            buf.record(inv, vec![content]);
+            buf.record(inv, vec![content], None);
             Ok(())
         }
     }
@@ -271,9 +284,10 @@ pub(crate) async fn apply(
                 tool.schema().kind,
                 acp::ToolCallStatus::Failed,
                 Some(vec![refusal()]),
+                None,
             )
             .await?;
-            buf.record(inv, vec![refusal()]);
+            buf.record(inv, vec![refusal()], None);
             Ok(Applied::Refused)
         }
         // `PermissionOptionKind` is `#[non_exhaustive]`; deny by default.
@@ -340,9 +354,10 @@ impl Manch {
                     acp::ToolKind::default(),
                     acp::ToolCallStatus::Failed,
                     Some(vec![content.clone()]),
+                    None,
                 )
                 .await?;
-                buf.record(&inv, vec![content]);
+                buf.record(&inv, vec![content], None);
                 continue;
             };
             let cx = ToolContext::new(session_id, &inv.id, ext.clone());
@@ -358,9 +373,10 @@ impl Manch {
                     tool.schema().kind,
                     acp::ToolCallStatus::Failed,
                     Some(vec![content.clone()]),
+                    None,
                 )
                 .await?;
-                buf.record(&inv, vec![content]);
+                buf.record(&inv, vec![content], None);
                 continue;
             }
             match tool.tier() {
@@ -380,7 +396,8 @@ impl Manch {
                             &inv,
                             tool.schema().kind,
                             acp::ToolCallStatus::Pending,
-                            Some(proposal),
+                            Some(proposal.content),
+                            proposal.raw_output,
                         );
                         sink.emit(AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(
                             pending.clone(),
@@ -666,11 +683,14 @@ mod tests {
                 &self,
                 cx: &ToolContext,
                 _args: serde_json::Value,
-            ) -> Result<acp::ToolCallContent> {
+            ) -> Result<manch_protocol::ToolOutcome> {
                 self.0.lock().unwrap().push(cx.get::<Scope>().cloned());
-                Ok(acp::ToolCallContent::Content(acp::Content::new(
-                    ContentBlock::Text(TextContent::new("ok".to_string())),
-                )))
+                Ok(
+                    acp::ToolCallContent::Content(acp::Content::new(ContentBlock::Text(
+                        TextContent::new("ok".to_string()),
+                    )))
+                    .into(),
+                )
             }
         }
 

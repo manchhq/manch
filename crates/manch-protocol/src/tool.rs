@@ -41,9 +41,19 @@ pub struct ToolInvocation {
     /// **Not a general-purpose bag.** Anything that does not have to survive a
     /// round trip to satisfy a provider belongs somewhere else.
     ///
-    /// `serde(default)` is load-bearing rather than tidiness: [`crate::Entry`]
-    /// is `Deserialize`, so a durable [`crate::MemoryStore`] will already hold
-    /// histories written before this field existed.
+    /// The two attributes below do different jobs, and only one is strictly
+    /// required.
+    ///
+    /// `skip_serializing_if` **is** load-bearing: without it an absent value
+    /// serialises as an explicit `null`, which is a different fact to anything
+    /// reading the transcript back than an absent key.
+    ///
+    /// `serde(default)` is *belt and braces*, kept for explicitness. It was
+    /// previously described here as load-bearing for back-compatibility; that
+    /// is not accurate for an `Option` field, which serde already fills with
+    /// `None` when the key is missing (verified, not assumed). The
+    /// back-compatibility guarantee is real and tested — it just does not
+    /// depend on this attribute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_meta: Option<serde_json::Value>,
 }
@@ -56,6 +66,64 @@ pub enum Tier {
     Read,
     /// Mutating; a caller may require confirmation before `call`.
     Draft,
+}
+
+/// What a tool produced: one rendering for the model, one for the host.
+///
+/// The split exists because these are different consumers with different needs.
+/// `content` is what the model reads and reasons over. `raw_output` is for
+/// whoever is watching the turn — a UI rendering a typed result, a log
+/// recording what came back, a test asserting on a value rather than on a
+/// sentence. Without it, all three have to re-parse the prose the model was
+/// given, or the tool has to smuggle results out through [`Extensions`] and
+/// pair them back up by convention.
+///
+/// Manch never interprets `raw_output`. It carries it to the [`EventSink`](crate::EventSink) and
+/// to memory, and that is all — the same contract as
+/// [`ToolInvocation::provider_meta`], for the same reason: the moment the
+/// substrate reads a field, it has opinions about a domain.
+///
+/// `content` is a `Vec` because [`Tool::propose`] previews with several blocks
+/// while `raw_output` is a single value either way — ACP's
+/// `ToolCallUpdateFields::raw_output` is one `Option`, not one per block. One
+/// outcome carries many renderings and at most one structured result, which is
+/// what both call sites actually need.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolOutcome {
+    /// What the model reads. Empty means "nothing to show" — the default
+    /// [`Tool::propose`] returns exactly that.
+    pub content: Vec<ToolCallContent>,
+    /// Populates ACP's `ToolCall::raw_output`. `None` for a tool with nothing
+    /// structured to say, which is most of them.
+    pub raw_output: Option<serde_json::Value>,
+}
+
+impl ToolOutcome {
+    /// Attach a structured result to an outcome.
+    #[must_use]
+    pub fn with_raw_output(mut self, raw_output: serde_json::Value) -> Self {
+        self.raw_output = Some(raw_output);
+        self
+    }
+}
+
+/// So a tool with nothing structured to say stays a one-line `Ok(text(..).into())`.
+impl From<ToolCallContent> for ToolOutcome {
+    fn from(content: ToolCallContent) -> Self {
+        Self {
+            content: vec![content],
+            raw_output: None,
+        }
+    }
+}
+
+impl From<Vec<ToolCallContent>> for ToolOutcome {
+    fn from(content: Vec<ToolCallContent>) -> Self {
+        Self {
+            content,
+            raw_output: None,
+        }
+    }
 }
 
 /// **Extension point 2.** What an agent can *do*. **This is where domain products
@@ -73,16 +141,12 @@ pub trait Tool: Send + Sync {
     /// Preview what `call` would do, without doing it. Defaults to an empty
     /// proposal — inert, unlike a default `tier()`, which would be a
     /// permission grant.
-    async fn propose(
-        &self,
-        _cx: &ToolContext,
-        _args: &serde_json::Value,
-    ) -> Result<Vec<ToolCallContent>> {
-        Ok(vec![])
+    async fn propose(&self, _cx: &ToolContext, _args: &serde_json::Value) -> Result<ToolOutcome> {
+        Ok(ToolOutcome::default())
     }
 
     /// Execute the tool with model-supplied JSON arguments.
-    async fn call(&self, cx: &ToolContext, args: serde_json::Value) -> Result<ToolCallContent>;
+    async fn call(&self, cx: &ToolContext, args: serde_json::Value) -> Result<ToolOutcome>;
 }
 
 /// Type-keyed storage for host-supplied context values passed to a tool at invocation.
@@ -195,5 +259,39 @@ mod context_tests {
         };
         let json = serde_json::to_value(&inv).unwrap();
         assert!(json.get("provider_meta").is_none(), "got {json}");
+    }
+
+    /// A text `ToolCallContent`, the shape almost every tool returns.
+    fn text_content(s: &str) -> ToolCallContent {
+        use crate::acp::{Content, ContentBlock, TextContent};
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+            s.to_string(),
+        ))))
+    }
+
+    #[test]
+    fn a_plain_content_becomes_an_outcome_with_no_structured_result() {
+        // The `From` impl is what keeps every existing tool a one-line
+        // `Ok(text(..).into())` rather than a struct literal at each site.
+        let outcome: ToolOutcome = text_content("42 appointments").into();
+        assert_eq!(outcome.content.len(), 1);
+        assert!(outcome.raw_output.is_none());
+    }
+
+    #[test]
+    fn an_outcome_carries_a_structured_result_alongside_the_prose() {
+        let outcome: ToolOutcome = ToolOutcome::from(text_content("2 results"))
+            .with_raw_output(serde_json::json!({ "hits": 2 }));
+        assert_eq!(outcome.raw_output, Some(serde_json::json!({ "hits": 2 })));
+        assert_eq!(outcome.content.len(), 1, "the model still gets its prose");
+    }
+
+    #[test]
+    fn the_default_proposal_is_inert() {
+        // `propose` defaults to showing nothing. A default that showed
+        // something would be inventing a preview the tool never wrote.
+        let outcome = ToolOutcome::default();
+        assert!(outcome.content.is_empty());
+        assert!(outcome.raw_output.is_none());
     }
 }

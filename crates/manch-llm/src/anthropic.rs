@@ -222,7 +222,7 @@ fn entry_json(entry: &Entry) -> Option<serde_json::Value> {
             "name": name,
             "input": arguments,
         })),
-        Entry::ToolResult { id, content } => Some(serde_json::json!({
+        Entry::ToolResult { id, content, .. } => Some(serde_json::json!({
             "type": "tool_result",
             "tool_use_id": id,
             "content": tool_result_content_json(content),
@@ -602,6 +602,7 @@ mod tests {
                 entries: vec![Entry::ToolResult {
                     id: "c1".into(),
                     content: vec![crate::text_content("2 matches")],
+                    raw_output: None,
                 }],
             },
         ];
@@ -1040,5 +1041,40 @@ mod tests {
             entries: vec![doc(Some("application/pdf"), "JVBERi0=")],
         };
         assert!(unsupported_content(&[turn]).is_none());
+    }
+
+    #[test]
+    fn a_structured_result_never_reaches_the_model() {
+        // The deliberate non-change in #73: the model reads prose, the host
+        // reads data, one call produces both. A turn carrying `raw_output`
+        // must serialise identically to one without it — otherwise the split
+        // is not a split, it is a second channel to the model.
+        let result = |raw: Option<serde_json::Value>| Turn {
+            role: Role::User,
+            entries: vec![Entry::ToolResult {
+                id: "c1".to_string(),
+                content: vec![crate::text_content("2 results")],
+                raw_output: raw,
+            }],
+        };
+        let with_raw = result(Some(serde_json::json!({ "hits": 2, "ids": ["a", "b"] })));
+        let without = result(None);
+        assert_eq!(
+            request_body(
+                "m",
+                &[with_raw],
+                &[],
+                crate::DEFAULT_MAX_OUTPUT_TOKENS,
+                false
+            ),
+            request_body(
+                "m",
+                &[without],
+                &[],
+                crate::DEFAULT_MAX_OUTPUT_TOKENS,
+                false
+            ),
+            "raw_output leaked onto the wire"
+        );
     }
 }
