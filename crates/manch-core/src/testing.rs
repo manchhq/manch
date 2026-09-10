@@ -77,11 +77,74 @@ impl Tool for EchoTool {
     fn tier(&self) -> Tier {
         self.tier
     }
-    async fn call(&self, _cx: &ToolContext, args: serde_json::Value) -> Result<ToolCallContent> {
+    async fn call(
+        &self,
+        _cx: &ToolContext,
+        args: serde_json::Value,
+    ) -> Result<manch_protocol::ToolOutcome> {
         self.log.lock().unwrap().push(self.name.clone());
-        Ok(ToolCallContent::Content(Content::new(ContentBlock::Text(
-            TextContent::new(args.to_string()),
-        ))))
+        Ok(
+            ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+                args.to_string(),
+            ))))
+            .into(),
+        )
+    }
+}
+
+/// A `Tool` that returns prose *and* a structured result — the pair a UI, a log
+/// or a test needs, where before only the prose existed.
+pub struct StructuredTool {
+    name: &'static str,
+}
+
+impl StructuredTool {
+    pub fn new(name: &'static str) -> Self {
+        Self { name }
+    }
+    /// The structured result this tool returns, so a test can assert on the
+    /// exact value rather than restating it.
+    pub fn raw_output() -> serde_json::Value {
+        serde_json::json!({ "hits": 2, "ids": ["a", "b"] })
+    }
+}
+
+#[async_trait]
+impl Tool for StructuredTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: self.name.to_string(),
+            description: "returns structured data".to_string(),
+            kind: ToolKind::default(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    async fn propose(
+        &self,
+        _cx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<manch_protocol::ToolOutcome> {
+        Ok(
+            manch_protocol::ToolOutcome::from(ToolCallContent::Content(Content::new(
+                ContentBlock::Text(TextContent::new("would search".to_string())),
+            )))
+            .with_raw_output(serde_json::json!({ "preview": true })),
+        )
+    }
+    async fn call(
+        &self,
+        _cx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<manch_protocol::ToolOutcome> {
+        Ok(
+            manch_protocol::ToolOutcome::from(ToolCallContent::Content(Content::new(
+                ContentBlock::Text(TextContent::new("2 results".to_string())),
+            )))
+            .with_raw_output(Self::raw_output()),
+        )
     }
 }
 
@@ -109,7 +172,11 @@ impl Tool for FailTool {
     fn tier(&self) -> Tier {
         Tier::Read
     }
-    async fn call(&self, _cx: &ToolContext, _args: serde_json::Value) -> Result<ToolCallContent> {
+    async fn call(
+        &self,
+        _cx: &ToolContext,
+        _args: serde_json::Value,
+    ) -> Result<manch_protocol::ToolOutcome> {
         Err(manch_protocol::Error::Other("boom".to_string()))
     }
 }

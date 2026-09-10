@@ -612,4 +612,103 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::Other(msg) if msg.contains("exceeded")));
     }
+
+    #[tokio::test]
+    async fn a_tools_structured_result_reaches_the_sink_and_the_transcript() {
+        // Before this, anything watching the turn had to re-parse the prose the
+        // model was given, or the tool had to smuggle results out through
+        // `Extensions` and pair them back up by convention.
+        use crate::testing::StructuredTool;
+
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![tool_call("search")],
+                vec![
+                    AgentEvent::text_chunk("done"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(MemStore::new());
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(StructuredTool::new("search")))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+        let sink = Arc::new(CollectSink::new());
+
+        manch
+            .handle("a", "s", user_msg("hi"), ext(), sink.clone())
+            .await
+            .unwrap();
+
+        // (1) It reaches whoever is watching the turn, in ACP's own field.
+        let seen = sink.events().iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(u))
+                    if u.fields.raw_output.as_ref() == Some(&StructuredTool::raw_output())
+            )
+        });
+        assert!(seen, "raw_output must reach the sink on the ToolCallUpdate");
+
+        // (2) And it is persisted beside the prose, not instead of it.
+        let (content, raw) = store
+            .entries()
+            .into_iter()
+            .find_map(|(_, e)| match e {
+                Entry::ToolResult {
+                    content,
+                    raw_output,
+                    ..
+                } => Some((content, raw_output)),
+                _ => None,
+            })
+            .expect("a tool result must be persisted");
+        assert_eq!(raw, Some(StructuredTool::raw_output()));
+        assert!(!content.is_empty(), "the model still gets its prose");
+    }
+
+    #[tokio::test]
+    async fn a_tool_with_nothing_structured_to_say_leaves_the_field_unset() {
+        // Most tools have nothing structured to say. An explicit null is a
+        // different fact to a UI than an absent field.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let agent = ScriptAgent::new(
+            "a",
+            vec![
+                vec![tool_call("echo")],
+                vec![
+                    AgentEvent::text_chunk("done"),
+                    AgentEvent::Done(StopReason::EndTurn),
+                ],
+            ],
+        );
+        let store = Arc::new(MemStore::new());
+        let manch = Manch::builder()
+            .agent(Arc::new(agent))
+            .tool(Arc::new(EchoTool::new("echo", Tier::Read, log)))
+            .memory(store.clone())
+            .build()
+            .unwrap();
+
+        manch
+            .handle(
+                "a",
+                "s",
+                user_msg("hi"),
+                ext(),
+                Arc::new(CollectSink::new()),
+            )
+            .await
+            .unwrap();
+
+        let raw = store.entries().into_iter().find_map(|(_, e)| match e {
+            Entry::ToolResult { raw_output, .. } => Some(raw_output),
+            _ => None,
+        });
+        assert_eq!(raw, Some(None), "the field must be absent, not null");
+    }
 }

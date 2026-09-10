@@ -28,6 +28,16 @@ pub enum Entry {
     ToolResult {
         id: String,
         content: Vec<ToolCallContent>,
+        /// The tool's structured result, carried for whoever is watching the
+        /// turn. Never sent to a provider — see the note on [`MemoryStore`].
+        ///
+        /// A durable store will hold histories written before this field
+        /// existed, and they must still load. That is tested, and it holds
+        /// because serde fills a missing `Option` with `None` on its own —
+        /// see [`ToolInvocation::provider_meta`](crate::ToolInvocation) for
+        /// which of the two attributes below is actually doing the work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_output: Option<serde_json::Value>,
     },
 }
 
@@ -60,6 +70,14 @@ pub fn coalesce_turns(items: impl IntoIterator<Item = (Role, Entry)>) -> Vec<Tur
 ///
 /// Implementations: SQLite default (`manch-memory`); swap for Postgres or a
 /// retrieval-backed strategy.
+///
+/// # `Entry::ToolResult::raw_output` and durable stores
+///
+/// A tool's structured result reaches the transcript, so a consumer whose tools
+/// return regulated data now holds that data in two places rather than one. An
+/// implementation is free to drop `raw_output` on `append` — and this order is
+/// deliberate: carrying it by default and letting a store decline is
+/// recoverable, whereas never carrying it cannot be undone by the store.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Append a role-tagged entry to a session's append-only history.
@@ -112,6 +130,7 @@ mod tests {
                 Entry::ToolResult {
                     id: "c1".into(),
                     content: vec![],
+                    raw_output: None,
                 },
             ),
         ]);
@@ -146,5 +165,34 @@ mod tests {
             "adjacent system entries coalesce"
         );
         assert_eq!(turns[1].role, Role::User);
+    }
+
+    #[test]
+    fn a_tool_result_stored_before_raw_output_existed_still_deserialises() {
+        // Same guarantee as `ToolInvocation::provider_meta`: a durable
+        // MemoryStore holds histories written before this field. Without
+        // serde(default), adopting it breaks every stored conversation.
+        let stored = r#"{"ToolResult":{"id":"c1","content":[]}}"#;
+        let entry: Entry = serde_json::from_str(stored).expect("old histories must load");
+        match entry {
+            Entry::ToolResult { id, raw_output, .. } => {
+                assert_eq!(id, "c1");
+                assert!(raw_output.is_none());
+            }
+            other => panic!("expected a ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tool_result_without_a_structured_result_does_not_serialise_the_key() {
+        // An absent key and an explicit null are different facts to anything
+        // reading the transcript back.
+        let entry = Entry::ToolResult {
+            id: "c1".to_string(),
+            content: vec![],
+            raw_output: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json["ToolResult"].get("raw_output").is_none());
     }
 }

@@ -83,7 +83,7 @@ pub use memory::{Entry, MemoryStore, Turn, coalesce_turns};
 pub use permission::{
     Approver, AskOncePolicy, PermissionDecision, PermissionPolicy, kind_of, once_options,
 };
-pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolSchema};
+pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolOutcome, ToolSchema};
 
 /// The error type returned across Manch's trait boundaries.
 ///

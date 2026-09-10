@@ -215,7 +215,7 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
             }
             Some(part)
         }
-        Entry::ToolResult { id, content } => {
+        Entry::ToolResult { id, content, .. } => {
             let name = resolve_tool_name(turns, turn_index, id).unwrap_or_else(|| id.clone());
             Some(serde_json::json!({
                 "functionResponse": {
@@ -669,6 +669,7 @@ mod tests {
                 entries: vec![Entry::ToolResult {
                     id: "c1".into(),
                     content: vec![crate::text_content("2 matches")],
+                    raw_output: None,
                 }],
             },
         ];
@@ -712,10 +713,12 @@ mod tests {
                     Entry::ToolResult {
                         id: "c1".into(),
                         content: vec![crate::text_content("2 matches")],
+                        raw_output: None,
                     },
                     Entry::ToolResult {
                         id: "c2".into(),
                         content: vec![crate::text_content("5 matches")],
+                        raw_output: None,
                     },
                 ],
             },
@@ -1074,6 +1077,29 @@ mod tests {
             serde_json::json!({
                 "inlineData": { "mimeType": "application/pdf", "data": "JVBERi0=" }
             })
+        );
+    }
+
+    #[test]
+    fn a_structured_result_never_reaches_the_model() {
+        // The deliberate non-change in #73: the model reads prose, the host
+        // reads data, one call produces both. A turn carrying `raw_output`
+        // must serialise identically to one without it — otherwise the split
+        // is not a split, it is a second channel to the model.
+        let result = |raw: Option<serde_json::Value>| Turn {
+            role: Role::User,
+            entries: vec![Entry::ToolResult {
+                id: "c1".to_string(),
+                content: vec![crate::text_content("2 results")],
+                raw_output: raw,
+            }],
+        };
+        let with_raw = result(Some(serde_json::json!({ "hits": 2, "ids": ["a", "b"] })));
+        let without = result(None);
+        assert_eq!(
+            request_body(&[with_raw], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS),
+            request_body(&[without], &[], crate::DEFAULT_MAX_OUTPUT_TOKENS),
+            "raw_output leaked onto the wire"
         );
     }
 }

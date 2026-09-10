@@ -304,7 +304,7 @@ fn turn_messages(turn: &Turn) -> Vec<serde_json::Value> {
     }
 
     for entry in &turn.entries {
-        if let Entry::ToolResult { id, content } = entry {
+        if let Entry::ToolResult { id, content, .. } = entry {
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": id,
@@ -750,6 +750,7 @@ mod tests {
                 entries: vec![Entry::ToolResult {
                     id: "c1".into(),
                     content: vec![crate::text_content("2 matches")],
+                    raw_output: None,
                 }],
             },
         ];
@@ -790,6 +791,7 @@ mod tests {
                 entries: vec![Entry::ToolResult {
                     id: "c1".into(),
                     content: vec![crate::text_content("2 matches")],
+                    raw_output: None,
                 }],
             },
         ];
@@ -1114,5 +1116,40 @@ mod tests {
     #[test]
     fn ordinary_text_is_never_refused() {
         assert!(unsupported_content(&[u("hi")]).is_none());
+    }
+
+    #[test]
+    fn a_structured_result_never_reaches_the_model() {
+        // The deliberate non-change in #73: the model reads prose, the host
+        // reads data, one call produces both. A turn carrying `raw_output`
+        // must serialise identically to one without it — otherwise the split
+        // is not a split, it is a second channel to the model.
+        let result = |raw: Option<serde_json::Value>| Turn {
+            role: Role::User,
+            entries: vec![Entry::ToolResult {
+                id: "c1".to_string(),
+                content: vec![crate::text_content("2 results")],
+                raw_output: raw,
+            }],
+        };
+        let with_raw = result(Some(serde_json::json!({ "hits": 2, "ids": ["a", "b"] })));
+        let without = result(None);
+        assert_eq!(
+            request_body(
+                "m",
+                &[with_raw],
+                &[],
+                crate::DEFAULT_MAX_OUTPUT_TOKENS,
+                "openai"
+            ),
+            request_body(
+                "m",
+                &[without],
+                &[],
+                crate::DEFAULT_MAX_OUTPUT_TOKENS,
+                "openai"
+            ),
+            "raw_output leaked onto the wire"
+        );
     }
 }

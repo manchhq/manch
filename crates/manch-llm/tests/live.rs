@@ -229,6 +229,7 @@ async fn assert_a_tool_loop_completes_two_turns(agent: impl Agent, provider: &st
                     content: vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
                         TextContent::new("18 degrees Celsius and sunny".to_string()),
                     )))],
+                    raw_output: None,
                 }],
             },
         ],
@@ -394,6 +395,7 @@ async fn gemini_completes_a_two_turn_loop_with_parallel_calls() {
             content: vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
                 TextContent::new("kaayantar, 23 beds".to_string()),
             )))],
+            raw_output: None,
         });
     }
 
