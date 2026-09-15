@@ -1,5 +1,6 @@
 //! BYOK OpenAI Chat Completions client (Codex BYOK path).
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,6 +26,10 @@ pub struct OpenAiAgent {
     /// Fireworks is OpenAI.
     id: &'static str,
     max_output_tokens: u32,
+    /// Hard cap for provider-side reasoning on OpenAI-compatible endpoints.
+    /// OpenAI proper uses a different, effort-level contract and never
+    /// receives this Fireworks-compatible integer extension.
+    compatible_reasoning_budget_tokens: Option<NonZeroU32>,
     http: crate::http::Http,
 }
 
@@ -36,6 +41,7 @@ impl OpenAiAgent {
             base: crate::resolve_base("openai", None, DEFAULT_BASE),
             id: "openai",
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            compatible_reasoning_budget_tokens: None,
             http: crate::http::Http::default(),
         }
     }
@@ -72,6 +78,23 @@ impl OpenAiAgent {
         self
     }
 
+    /// Cap hidden reasoning on an OpenAI-compatible endpoint, in tokens.
+    ///
+    /// Fireworks exposes this as the integer form of `reasoning_effort`. The
+    /// reasoning budget counts toward [`Self::max_output_tokens`], so leave
+    /// enough of the total allowance for the visible answer. The value is
+    /// deliberately [`NonZeroU32`]: a zero-token budget is not valid on the
+    /// Fireworks API.
+    ///
+    /// OpenAI proper does not accept this integer extension. Calling this on
+    /// an [`OpenAiAgent::new`] agent is therefore safe but has no wire effect;
+    /// only agents created through [`OpenAiAgent::compatible`] send it.
+    #[must_use]
+    pub fn compatible_reasoning_budget_tokens(mut self, n: NonZeroU32) -> Self {
+        self.compatible_reasoning_budget_tokens = Some(n);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn max_output_tokens_for_test(&self) -> u32 {
         self.max_output_tokens
@@ -105,6 +128,7 @@ impl OpenAiAgent {
             base: crate::resolve_base(env_key, None, default_base),
             id,
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
+            compatible_reasoning_budget_tokens: None,
             http: crate::http::Http::default(),
         }
     }
@@ -134,6 +158,16 @@ impl OpenAiAgent {
     #[must_use]
     pub(crate) fn model_for_test(&self) -> &str {
         &self.model
+    }
+
+    fn request_body(&self, turns: &[Turn], tools: &[ToolSchema]) -> serde_json::Value {
+        let mut body = request_body(&self.model, turns, tools, self.max_output_tokens, self.id);
+        if self.id != "openai"
+            && let Some(budget) = self.compatible_reasoning_budget_tokens
+        {
+            body["reasoning_effort"] = budget.get().into();
+        }
+        body
     }
 }
 
@@ -565,13 +599,7 @@ impl Agent for OpenAiAgent {
                     .client()
                     .post(completions_url(&self.base))
                     .bearer_auth(&self.api_key)
-                    .json(&request_body(
-                        &self.model,
-                        &ctx.turns,
-                        tools,
-                        self.max_output_tokens,
-                        self.id,
-                    )),
+                    .json(&self.request_body(&ctx.turns, tools)),
             )
             .await?;
 
@@ -639,6 +667,15 @@ mod tests {
     fn parse_line_extracts_delta_content() {
         let d = r#"{"choices":[{"delta":{"content":"Hi"}}]}"#;
         assert!(matches!(parse_line(d).as_slice(), [crate::SseItem::Text(t)] if t == "Hi"));
+    }
+
+    #[test]
+    fn parse_line_ignores_hidden_reasoning_and_emits_visible_content() {
+        let d = r#"{"choices":[{"delta":{"reasoning_content":"Think privately","content":"Visible answer"}}]}"#;
+        assert!(matches!(
+            parse_line(d).as_slice(),
+            [crate::SseItem::Text(t)] if t == "Visible answer"
+        ));
     }
 
     #[test]
@@ -1021,6 +1058,43 @@ mod tests {
         let body = request_body("m", &[u("hi")], &[], a.max_output_tokens_for_test(), a.id());
         assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_OUTPUT_TOKENS);
         assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn a_compatible_provider_gets_an_integer_reasoning_budget_when_configured() {
+        let budget = NonZeroU32::new(4_096).expect("the fixture is non-zero");
+        let a =
+            crate::fireworks::agent("k".into(), None).compatible_reasoning_budget_tokens(budget);
+        let body = a.request_body(&[u("hi")], &[]);
+
+        assert_eq!(body["reasoning_effort"], 4_096);
+        assert_eq!(body["max_tokens"], crate::DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn an_unconfigured_compatible_provider_omits_reasoning_effort() {
+        let a = crate::fireworks::agent("k".into(), None);
+        let body = a.request_body(&[u("hi")], &[]);
+
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn openai_proper_never_receives_the_compatible_integer_extension() {
+        let budget = NonZeroU32::new(4_096).expect("the fixture is non-zero");
+        let a = OpenAiAgent::new("k".into(), None).compatible_reasoning_budget_tokens(budget);
+        let body = a.request_body(&[u("hi")], &[]);
+
+        assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(
+            body["max_completion_tokens"],
+            crate::DEFAULT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    #[test]
+    fn a_zero_reasoning_budget_cannot_be_constructed() {
+        assert!(NonZeroU32::new(0).is_none());
     }
 
     #[test]
