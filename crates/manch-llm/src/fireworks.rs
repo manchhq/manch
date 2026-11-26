@@ -54,7 +54,7 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
 pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
     let base = crate::resolve_base(ID, base, DEFAULT_BASE);
     let resp = crate::http::shared()
-        .client()
+        .client()?
         .get(format!("{base}/models"))
         .bearer_auth(api_key)
         .send()

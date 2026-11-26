@@ -31,6 +31,7 @@ pub struct OpenAiAgent {
     /// receives this Fireworks-compatible integer extension.
     compatible_reasoning_budget_tokens: Option<NonZeroU32>,
     http: crate::http::Http,
+    generation: Option<(crate::GenerationOptions, crate::ModelPolicy)>,
 }
 
 impl OpenAiAgent {
@@ -43,8 +44,49 @@ impl OpenAiAgent {
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
             compatible_reasoning_budget_tokens: None,
             http: crate::http::Http::default(),
+            generation: None,
         }
     }
+    /// Configure generation against the host's verified exact-model policy.
+    pub fn generation_options(
+        mut self,
+        options: crate::GenerationOptions,
+        policy: crate::ModelPolicy,
+    ) -> Result<Self> {
+        self.max_output_tokens = crate::generation::configure(
+            self.id,
+            &self.model,
+            self.max_output_tokens,
+            &options,
+            &policy,
+        )?;
+        self.generation = Some((options, policy));
+        self.validate_reasoning_configuration()?;
+        Ok(self)
+    }
+
+    fn validate_reasoning_configuration(&self) -> Result<()> {
+        if self.id != "openai"
+            && self.compatible_reasoning_budget_tokens.is_some()
+            && self
+                .generation
+                .as_ref()
+                .is_some_and(|(options, _)| options.reasoning.is_some())
+        {
+            return Err(manch_protocol::Error::InvalidArguments("configure reasoning with either typed options or the compatible budget helper, not both".into()));
+        }
+        Ok(())
+    }
+
+    /// Reuse a host-configured connection pool. The supplied client owns its
+    /// timeout, redirect and low-level retry policies. Calling a timeout builder
+    /// afterwards creates a new client; `max_retries` keeps this pool intact.
+    #[must_use]
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http = self.http.with_client(client);
+        self
+    }
+
     /// Time allowed to establish a connection. See
     /// [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT).
     #[must_use]
@@ -130,6 +172,7 @@ impl OpenAiAgent {
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
             compatible_reasoning_budget_tokens: None,
             http: crate::http::Http::default(),
+            generation: None,
         }
     }
 
@@ -235,7 +278,7 @@ fn tool_result_text(content: &[ToolCallContent]) -> String {
 /// wrong, since a PNG data URI succeeds on the same endpoint and model — so
 /// that claim is deliberately not repeated to the host.
 fn unsupported_content(turns: &[Turn]) -> Option<String> {
-    crate::unsupported_resource(turns, |mime| mime.starts_with("image/"))
+    crate::unsupported_resource(turns, false, |mime| mime.starts_with("image/"))
 }
 
 /// A turn's `content` value: the bare string OpenAI has always been sent when
@@ -246,10 +289,8 @@ fn unsupported_content(turns: &[Turn]) -> Option<String> {
 /// deliberately — switching every existing request to an array to enable a rare
 /// one would be a regression surface for no gain.
 ///
-/// `ContentBlock::Audio` and the two resource variants are still dropped:
-/// Chat Completions encodes audio as `input_audio` with a bare format name
-/// (`"wav"`, `"mp3"`), not a MIME type, so mapping it is a different problem
-/// than this one and inventing the translation here would be a guess.
+/// Unsupported blocks are rejected before mapping; this adapter does not
+/// implement audio or provider-native document references.
 fn turn_content(turn: &Turn) -> serde_json::Value {
     let has_non_text_block = turn
         .entries
@@ -408,22 +449,39 @@ pub(crate) fn request_body(
     body
 }
 
-/// Parse one SSE line. `[DONE]` is the stream terminator (not JSON) → None. Pure.
+/// Parse one SSE event. Preserve `[DONE]` so the driver rejects later frames.
 pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     if data == "[DONE]" {
-        return Vec::new();
+        return vec![SseItem::Closed];
     }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
-        return Vec::new();
+        return vec![SseItem::Error("malformed provider frame".into())];
     };
-    if let Some(msg) = v
+    if let Some(_msg) = v
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(|m| m.as_str())
     {
-        return vec![SseItem::Error(format!("openai: {msg}"))];
+        return vec![SseItem::Error("openai: stream failed".to_string())];
     }
     let mut out = Vec::new();
+    let identity = &v;
+    let response_id = identity
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let reported_model = identity
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if response_id.is_some() || reported_model.is_some() {
+        out.push(SseItem::Metadata(manch_protocol::ProviderMetadata {
+            response_id,
+            reported_model,
+            ..Default::default()
+        }));
+    }
+
     // `stream_options.include_usage` makes OpenAI send `"usage": null` on every
     // non-final chunk, so `get("usage")` is Some(Null) there — filter it out or
     // an empty Usage event fires per frame. Anthropic guards by frame type and
@@ -453,29 +511,61 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     if !content.is_empty() {
         out.push(SseItem::Text(content.to_string()));
     }
+    if let Some(thought) = delta
+        .and_then(|d| d.get("reasoning_content"))
+        .and_then(|v| v.as_str())
+    {
+        out.push(SseItem::Thought(thought.to_string()));
+    }
     // `finish_reason` closes the turn. `"tool_calls"` is deliberately *not*
     // treated as a tool-call signal: it arrives on a frame that carries no
     // index, and OpenAI never marks an individual call finished on its own —
     // `ToolAccum::flush` closes whatever is still open when the stream ends
     // (Task 10). It still maps to `EndTurn` like any other ordinary finish.
-    if let Some(reason) = v
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("finish_reason"))
-        .and_then(|r| r.as_str())
-    {
-        out.push(SseItem::Stop(crate::stop_reason(reason)));
-    }
     if let Some(tool_calls) = delta
         .and_then(|d| d.get("tool_calls"))
         .and_then(|t| t.as_array())
     {
         for tc in tool_calls {
             let Some(index) = tc.get("index").and_then(|i| i.as_u64()) else {
+                out.push(SseItem::Error("tool delta has no index".into()));
                 continue;
             };
-            let index = index as u32;
+            let Ok(index) = u32::try_from(index) else {
+                out.push(SseItem::Error("invalid tool index".into()));
+                continue;
+            };
+            let function = tc.get("function");
+            let id = tc.get("id").and_then(|id| id.as_str());
+            let name = function
+                .and_then(|f| f.get("name"))
+                .and_then(|name| name.as_str());
+            if function
+                .and_then(|f| f.get("arguments"))
+                .is_some_and(|a| !a.is_string())
+            {
+                out.push(SseItem::Error(
+                    "tool arguments must be a JSON string".into(),
+                ));
+                continue;
+            }
+            if id.is_some() != name.is_some()
+                || id == Some("")
+                || name == Some("")
+                || function.is_none_or(|f| !f.is_object())
+            {
+                out.push(SseItem::Error("malformed tool delta".into()));
+                continue;
+            }
+            if id.is_none()
+                && function
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|a| a.as_str())
+                    .is_none()
+            {
+                out.push(SseItem::Error("empty tool delta".into()));
+                continue;
+            }
             // `id` and `function.name` arrive only on the first delta for a
             // given index; later deltas for that index carry only
             // `function.arguments` fragments.
@@ -504,6 +594,15 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                 });
             }
         }
+    }
+    if let Some(reason) = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|r| r.as_str())
+    {
+        out.push(crate::stop_item(reason));
     }
     out
 }
@@ -565,7 +664,7 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
 pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
     let base = crate::resolve_base("openai", base, DEFAULT_BASE);
     let resp = crate::http::shared()
-        .client()
+        .client()?
         .get(models_url(&base))
         .bearer_auth(api_key)
         .send()
@@ -585,6 +684,14 @@ impl Agent for OpenAiAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
+        sink.emit(manch_protocol::AgentEvent::Metadata(
+            manch_protocol::ProviderMetadata {
+                provider: Some(self.id.to_string()),
+                requested_model: Some(self.model.clone()),
+                ..Default::default()
+            },
+        ))
+        .await?;
         if let Some(why) = unsupported_content(&ctx.turns) {
             return Err(manch_protocol::Error::Unsupported(format!(
                 "{}: {why}. Chat Completions carries images only — rasterise the \
@@ -592,19 +699,28 @@ impl Agent for OpenAiAgent {
                 self.id
             )));
         }
+        self.validate_reasoning_configuration()?;
+        let mut body = self.request_body(&ctx.turns, tools);
+        crate::generation::apply(
+            &mut body,
+            self.id,
+            &self.model,
+            self.max_output_tokens,
+            &self.generation,
+        )?;
         let resp = self
             .http
             .send(
                 self.http
-                    .client()
+                    .client()?
                     .post(completions_url(&self.base))
                     .bearer_auth(&self.api_key)
-                    .json(&self.request_body(&ctx.turns, tools)),
+                    .json(&body),
             )
             .await?;
 
         if !resp.status().is_success() {
-            return Err(crate::http_error("openai", resp).await);
+            return Err(crate::http_error(self.id, resp).await);
         }
         crate::stream_sse(resp, &sink, parse_line).await
     }
@@ -670,11 +786,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_line_ignores_hidden_reasoning_and_emits_visible_content() {
+    fn parse_line_keeps_hidden_reasoning_separate_from_visible_content() {
         let d = r#"{"choices":[{"delta":{"reasoning_content":"Think privately","content":"Visible answer"}}]}"#;
         assert!(matches!(
             parse_line(d).as_slice(),
-            [crate::SseItem::Text(t)] if t == "Visible answer"
+            [crate::SseItem::Text(t),crate::SseItem::Thought(thought)] if t == "Visible answer" && thought == "Think privately"
         ));
     }
 
@@ -764,10 +880,11 @@ mod tests {
                 .any(|i| matches!(i, crate::SseItem::ToolCallEnd { .. })),
             "a finish_reason frame must never close an individual tool call"
         );
-        assert!(items.iter().any(|i| matches!(
-            i,
-            crate::SseItem::Stop(manch_protocol::acp::StopReason::EndTurn)
-        )));
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, crate::SseItem::ToolFinish))
+        );
     }
 
     #[test]
@@ -921,7 +1038,7 @@ mod tests {
 
     #[test]
     fn parse_line_ignores_done_sentinel() {
-        assert!(parse_line("[DONE]").is_empty());
+        assert!(matches!(parse_line("[DONE]").as_slice(), [SseItem::Closed]));
     }
 
     #[test]
@@ -1156,7 +1273,7 @@ mod tests {
             entries: vec![doc(Some("application/pdf"), "JVBERi0=")],
         };
         let refusal = unsupported_content(&[turn]).expect("a PDF must be refused");
-        assert!(refusal.contains("application/pdf"), "got {refusal}");
+        assert!(refusal.contains("cannot be represented"), "got {refusal}");
         // The provider's own error blames the data URI scheme, which is wrong —
         // a PNG data URI works on the same endpoint and model. Repeating that
         // claim would send a host chasing the wrong fix.

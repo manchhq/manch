@@ -27,7 +27,15 @@ pub use openai::OpenAiAgent;
 #[cfg(feature = "fireworks")]
 pub mod fireworks;
 
+mod completion;
+mod generation;
 mod http;
+pub use completion::{
+    Completion, CompletionCollector, CompletionFailure, PartialCompletion, collect_completion,
+};
+pub use generation::{
+    GenerationOptions, ModelPolicy, ReasoningEffort, ReasoningKind, ReasoningOptions, ThinkingLevel,
+};
 pub use http::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_RETRIES, DEFAULT_READ_TIMEOUT};
 
 /// What a model is *for*. Derived from whatever the provider publishes, so it
@@ -109,8 +117,12 @@ impl ModelInfo {
 #[derive(Debug)]
 pub(crate) enum SseItem {
     Text(String),
+    Thought(String),
+    Metadata(manch_protocol::ProviderMetadata),
     Usage(Usage),
     Error(String),
+    Closed,
+    ToolFinish,
     /// A tool call has begun at `index` (the provider's stream slot).
     ToolCallStart {
         index: u32,
@@ -158,17 +170,36 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 /// The three dialects spell the same facts differently — Anthropic
 /// `"max_tokens"`, OpenAI `"length"`, Gemini `"MAX_TOKENS"` — and all three
 /// were previously discarded, so a truncated turn was indistinguishable from a
-/// complete one. Anything unrecognised reads as [`StopReason::EndTurn`]: a stop
-/// reason nobody understands is not evidence that something went wrong.
-pub(crate) fn stop_reason(raw: &str) -> StopReason {
+/// complete one. Unknown values remain unknown and make a stream incomplete.
+pub(crate) fn stop_reason(raw: &str) -> Option<StopReason> {
     match raw {
-        "max_tokens" | "length" | "MAX_TOKENS" => StopReason::MaxTokens,
+        "max_tokens" | "length" | "MAX_TOKENS" => Some(StopReason::MaxTokens),
         // Anthropic reports a refusal outright; OpenAI and Gemini report the
         // filter that produced it. ACP has one word for all of them.
         "refusal" | "content_filter" | "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
-        | "IMAGE_SAFETY" => StopReason::Refusal,
-        _ => StopReason::EndTurn,
+        | "IMAGE_SAFETY" => Some(StopReason::Refusal),
+        "STOP" | "stop" | "end_turn" | "tool_calls" | "tool_use" | "stop_sequence" => {
+            Some(StopReason::EndTurn)
+        }
+        _ => None,
     }
+}
+
+pub(crate) fn stop_item(raw: &str) -> SseItem {
+    if matches!(raw, "tool_calls" | "tool_use") {
+        return SseItem::ToolFinish;
+    }
+    stop_reason(raw)
+        .map(SseItem::Stop)
+        .unwrap_or_else(|| SseItem::Error("unrecognized provider finish status".into()))
+}
+
+pub(crate) fn incomplete() -> manch_protocol::Error {
+    provider_failure(
+        "provider",
+        None,
+        manch_protocol::ProviderFailureKind::Incomplete,
+    )
 }
 
 /// Assembles streamed tool-call fragments into complete [`AgentEvent::ToolCall`]s.
@@ -177,10 +208,31 @@ pub(crate) fn stop_reason(raw: &str) -> StopReason {
 /// which must stay a pure function of one line. Keyed by the provider's
 /// stream `index` because a model may open several tool calls before closing
 /// any of them (interleaved calls).
-#[derive(Default)]
 pub(crate) struct ToolAccum {
     /// index -> (id, name, accumulated argument JSON, provider round-trip data).
     open: HashMap<u32, (String, String, String, Option<serde_json::Value>)>,
+    order: Vec<u32>,
+    ended: std::collections::HashSet<u32>,
+    next_id: u64,
+    namespace: String,
+}
+
+impl Default for ToolAccum {
+    fn default() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static ROUND: AtomicU64 = AtomicU64::new(0);
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Self {
+            open: HashMap::new(),
+            order: Vec::new(),
+            ended: std::collections::HashSet::new(),
+            next_id: 0,
+            namespace: format!("{time:x}-{:x}", ROUND.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
 }
 
 impl ToolAccum {
@@ -200,6 +252,15 @@ impl ToolAccum {
                 name,
                 provider_meta,
             } => {
+                let id = if id.is_empty() {
+                    format!("manch-call-{}-{}", self.namespace, self.next_id)
+                } else {
+                    id
+                };
+                self.next_id += 1;
+                if !self.open.contains_key(&index) {
+                    self.order.push(index);
+                }
                 self.open
                     .insert(index, (id, name, String::new(), provider_meta));
                 None
@@ -211,7 +272,17 @@ impl ToolAccum {
                 None
             }
             SseItem::ToolCallEnd { index } => {
-                let (id, name, json, provider_meta) = self.open.remove(&index)?;
+                if !self.open.contains_key(&index) {
+                    return None;
+                }
+                self.ended.insert(index);
+                let first = *self.order.first()?;
+                if !self.ended.contains(&first) {
+                    return None;
+                }
+                self.order.remove(0);
+                self.ended.remove(&first);
+                let (id, name, json, provider_meta) = self.open.remove(&first)?;
                 Some(AgentEvent::ToolCall(ToolInvocation {
                     id,
                     name,
@@ -219,7 +290,7 @@ impl ToolAccum {
                     provider_meta,
                 }))
             }
-            SseItem::Text(_) | SseItem::Usage(_) | SseItem::Error(_) | SseItem::Stop(_) => None,
+            _ => None,
         }
     }
 
@@ -227,9 +298,11 @@ impl ToolAccum {
     /// marks an individual call finished; the stream ending is the only
     /// signal). Drains the map, so calling `flush` twice cannot replay a call.
     pub(crate) fn flush(&mut self) -> Vec<AgentEvent> {
-        self.open
-            .drain()
-            .map(|(_, (id, name, json, provider_meta))| {
+        self.ended.clear();
+        std::mem::take(&mut self.order)
+            .into_iter()
+            .filter_map(|index| self.open.remove(&index))
+            .map(|(id, name, json, provider_meta)| {
                 AgentEvent::ToolCall(ToolInvocation {
                     id,
                     name,
@@ -243,9 +316,8 @@ impl ToolAccum {
 
 /// Parse a tool call's accumulated argument JSON. An empty accumulation means
 /// "no arguments" and becomes `{}`; a malformed accumulation cannot panic —
-/// `AgentEvent` has no error variant to carry a parse failure through, so it
-/// degrades to `Value::Null` rather than aborting the stream over one
-/// unparsable call.
+/// the internal sentinel is `Value::Null`. The stream driver rejects it before
+/// emitting a ToolCall or declaring completion.
 ///
 /// **`Null` is load-bearing.** `manch-core` reads it as "these arguments never
 /// parsed" and answers the call with an error the model can act on instead of
@@ -261,18 +333,41 @@ fn parse_tool_arguments(json: &str) -> serde_json::Value {
     serde_json::from_str(json).unwrap_or(serde_json::Value::Null)
 }
 
-/// Drain complete `\n`-terminated lines from `buf`, applying `parse` to each
-/// line's trimmed `data:` payload. Any trailing partial line is retained in
-/// `buf`. Splitting on the ASCII `\n` byte keeps multibyte UTF-8 sequences
-/// (Devanagari, CJK, emoji) whole across network chunk boundaries.
+/// Drain complete SSE events (blank-line delimited), joining their data lines.
+/// Retain incomplete events, including a terminal JSON line without its event
+/// delimiter, so EOF cannot turn a truncated response into success.
 pub(crate) fn drain_sse(buf: &mut Vec<u8>, parse: impl Fn(&str) -> Vec<SseItem>) -> Vec<SseItem> {
     let mut out = Vec::new();
-    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-        let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-        let line = String::from_utf8_lossy(&line_bytes);
-        let line = line.trim();
-        if let Some(data) = line.strip_prefix("data:") {
-            out.extend(parse(data.trim()));
+    loop {
+        let mut line_start = 0;
+        let mut end = None;
+        for (index, byte) in buf.iter().enumerate() {
+            if *byte == b'\n' {
+                let line = &buf[line_start..index];
+                if line.is_empty() || line == b"\r" {
+                    end = Some(index + 1);
+                    break;
+                }
+                line_start = index + 1;
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        let event: Vec<u8> = buf.drain(..end).collect();
+        let Ok(event) = std::str::from_utf8(&event) else {
+            out.push(SseItem::Error("invalid provider UTF-8".into()));
+            continue;
+        };
+        let data: Vec<_> = event
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("data:")
+                    .map(|data| data.strip_prefix(' ').unwrap_or(data))
+            })
+            .collect();
+        if !data.is_empty() {
+            out.extend(parse(&data.join("\n")));
         }
     }
     out
@@ -299,35 +394,35 @@ pub(crate) fn binary_block(block: &ContentBlock) -> Option<(&str, &str)> {
     }
 }
 
-/// The first `Resource` blob in `turns` that `accepts` cannot encode, as a
-/// message for [`manch_protocol::Error::Unsupported`].
-///
-/// Refused rather than dropped, and the line is deliberate: a document is
-/// carried by two of the three providers, so a host meeting this can act on it
-/// — rasterise into page images, or route to a vendor that takes PDFs. Losing
-/// it silently is the bug #53 was about.
-///
-/// `ContentBlock::Audio` is *not* checked here and remains a documented drop.
-/// Nothing maps it on any provider, so it is an unimplemented feature rather
-/// than a routing decision, and there is nothing for a host to do differently.
-pub(crate) fn unsupported_resource(turns: &[Turn], accepts: fn(&str) -> bool) -> Option<String> {
-    turns
-        .iter()
-        .flat_map(|t| &t.entries)
-        .filter_map(|e| match e {
-            Entry::Block(b @ ContentBlock::Resource(_)) => Some(b),
-            _ => None,
-        })
-        .find_map(|b| match binary_block(b) {
-            Some((mime, _)) if accepts(mime) => None,
-            Some((mime, _)) => Some(format!(
-                "this provider cannot carry a resource of type '{mime}'"
-            )),
-            None => Some(
-                "a resource was sent with no declared media type, so it cannot be encoded"
-                    .to_string(),
-            ),
-        })
+/// Reject content that would otherwise disappear during provider mapping.
+/// Diagnostics intentionally never include MIME strings, URIs or document data.
+pub(crate) fn unsupported_resource(
+    turns: &[Turn],
+    links: bool,
+    accepts: fn(&str) -> bool,
+) -> Option<String> {
+    for turn in turns {
+        for entry in &turn.entries {
+            if turn.role == manch_protocol::Role::System
+                && !matches!(entry, Entry::Block(ContentBlock::Text(_)))
+            {
+                return Some("system instructions support text only".into());
+            }
+            let valid=match entry {
+                Entry::Block(ContentBlock::Text(_))=>true,
+                Entry::Block(ContentBlock::Image(image))=>image.mime_type.starts_with("image/") && accepts(&image.mime_type),
+                Entry::Block(block @ ContentBlock::Resource(_))=>binary_block(block).is_some_and(|(mime,_)|accepts(mime)),
+                Entry::Block(ContentBlock::ResourceLink(link))=>links && !link.name.is_empty() && link.mime_type.as_deref().is_some_and(accepts) && reqwest::Url::parse(&link.uri).is_ok_and(|url|matches!(url.scheme(),"https"|"gs")),
+                Entry::Block(_)=>false,
+                Entry::ToolResult{content,..}=>content.iter().all(|c|matches!(c,manch_protocol::acp::ToolCallContent::Content(c) if matches!(c.content,ContentBlock::Text(_)))),
+                Entry::ToolCall(_)=>true,
+            };
+            if !valid {
+                return Some("content cannot be represented by this provider".into());
+            }
+        }
+    }
+    None
 }
 
 /// Concatenate a turn's text blocks into one string. Non-text blocks and
@@ -382,9 +477,25 @@ pub(crate) fn resolve_base(provider: &str, explicit: Option<&str>, default: &str
     pick_base(explicit, env.as_deref(), default)
 }
 
-/// Map any error into `manch_protocol::Error::Other`.
-pub(crate) fn err(e: impl ToString) -> manch_protocol::Error {
-    manch_protocol::Error::Other(e.to_string())
+/// Discard untrusted decoder/stream detail and retain a safe classification.
+pub(crate) fn err(_error: impl ToString) -> manch_protocol::Error {
+    provider_failure(
+        "provider",
+        None,
+        manch_protocol::ProviderFailureKind::Stream,
+    )
+}
+
+pub(crate) fn provider_failure(
+    provider: &str,
+    status: Option<u16>,
+    kind: manch_protocol::ProviderFailureKind,
+) -> manch_protocol::Error {
+    manch_protocol::Error::Provider {
+        provider: provider.into(),
+        status,
+        kind,
+    }
 }
 
 /// Build a `ModelInfo` for a provider's fallback id.
@@ -413,25 +524,17 @@ pub(crate) async fn list_models_with(
     }
 }
 
-/// Extract a human error message from a response body. Surfaces `error.message`
-/// when the body is JSON; otherwise `"{provider}: HTTP {status}"`. Pure — split
-/// from [`http_error`] so the fallback behaviour is unit-testable. A proxy's
-/// HTML 502/504 body simply fails to parse and takes the fallback branch.
-pub(crate) fn error_message(provider: &str, status: reqwest::StatusCode, body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
-        .map(|m| format!("{provider}: {m}"))
-        .unwrap_or_else(|| format!("{provider}: HTTP {status}"))
-}
-
-/// Turn a non-2xx response into an error. Reads the body as **text first** — a
-/// proxy's HTML 502/504 isn't JSON, and calling `.json()` on it would mask the
-/// real status behind a generic decode error. Consumes `resp`.
+/// Classify HTTP failures without reading or retaining untrusted response prose.
 pub(crate) async fn http_error(provider: &str, resp: reqwest::Response) -> manch_protocol::Error {
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    err(error_message(provider, status, &text))
+    use manch_protocol::ProviderFailureKind as K;
+    let kind = match status.as_u16() {
+        401 | 403 => K::Authentication,
+        429 => K::RateLimit,
+        500..=599 => K::Server,
+        _ => K::InvalidRequest,
+    };
+    provider_failure(provider, Some(status.as_u16()), kind)
 }
 
 /// Read one token count out of a provider's usage object. Absent or non-numeric
@@ -456,10 +559,20 @@ pub(crate) fn nested_token_count(usage: &serde_json::Value, outer: &str, key: &s
 pub(crate) fn item_to_event(item: SseItem) -> Result<AgentEvent> {
     match item {
         SseItem::Text(t) => Ok(AgentEvent::text_chunk(t)),
+        SseItem::Thought(t) => Ok(AgentEvent::Update(
+            manch_protocol::acp::SessionUpdate::AgentThoughtChunk(
+                manch_protocol::acp::ContentChunk::new(ContentBlock::Text(
+                    manch_protocol::acp::TextContent::new(t),
+                )),
+            ),
+        )),
         SseItem::Usage(u) => Ok(AgentEvent::Usage(u)),
+        SseItem::Metadata(meta) => Ok(AgentEvent::Metadata(meta)),
         SseItem::Error(e) => Err(err(e)),
         // `stream_items` intercepts this before it can reach here.
-        SseItem::Stop(_) => unreachable!("Stop is consumed by stream_items"),
+        SseItem::Stop(_) | SseItem::Closed | SseItem::ToolFinish => {
+            unreachable!("terminal markers are consumed by stream_items")
+        }
         SseItem::ToolCallStart { .. }
         | SseItem::ToolCallArgs { .. }
         | SseItem::ToolCallEnd { .. } => {
@@ -492,32 +605,83 @@ where
 {
     let mut buf: Vec<u8> = Vec::new();
     let mut accum = ToolAccum::default();
-    // The provider's own verdict on why the turn ended. `EndTurn` until told
-    // otherwise: a stream that never says is a stream that ended normally.
-    let mut stop = StopReason::EndTurn;
+    // EOF alone is not proof of completion; require a known terminal verdict.
+    let mut stop = None;
+    let mut closed = false;
+    let mut calls = 0;
+    let mut ids = std::collections::HashSet::new();
     while let Some(chunk) = chunks.next().await {
-        buf.extend_from_slice(&chunk.map_err(err)?);
+        buf.extend_from_slice(&chunk.map_err(http::transport_err)?);
         for item in drain_sse(&mut buf, &parse) {
+            if closed {
+                return Err(incomplete());
+            }
+            if stop.is_some()
+                && !matches!(
+                    &item,
+                    SseItem::Usage(_) | SseItem::Metadata(_) | SseItem::Closed
+                )
+            {
+                return Err(incomplete());
+            }
+            match &item {
+                SseItem::ToolCallStart { index, .. } => {
+                    if accum.open.contains_key(index) {
+                        return Err(incomplete());
+                    }
+                    calls += 1;
+                }
+                SseItem::ToolCallArgs { index, .. }
+                    if !accum.open.contains_key(index) || accum.ended.contains(index) =>
+                {
+                    return Err(incomplete());
+                }
+                _ => {}
+            }
             match item {
                 SseItem::ToolCallStart { .. }
                 | SseItem::ToolCallArgs { .. }
                 | SseItem::ToolCallEnd { .. } => {
                     if let Some(ev) = accum.apply(item) {
-                        sink.emit(ev).await?;
+                        emit_valid_call(sink, ev, &mut ids).await?;
                     }
                 }
                 // Recorded, not emitted — exactly one `Done` closes a turn, and
                 // it is sent below once the stream is fully drained.
-                SseItem::Stop(s) => stop = s,
+                SseItem::Stop(s) => stop = Some(s),
+                SseItem::Closed => closed = true,
+                SseItem::ToolFinish => {
+                    if calls == 0 {
+                        return Err(incomplete());
+                    }
+                    stop = Some(StopReason::EndTurn);
+                }
                 other => sink.emit(item_to_event(other)?).await?,
             }
         }
     }
+    if buf.iter().any(|b| !b.is_ascii_whitespace()) {
+        return Err(incomplete());
+    }
+    let stop = stop.ok_or_else(incomplete)?;
     for ev in accum.flush() {
-        sink.emit(ev).await?;
+        emit_valid_call(sink, ev, &mut ids).await?;
     }
     sink.emit(AgentEvent::Done(stop)).await?;
     Ok(stop)
+}
+
+async fn emit_valid_call(
+    sink: &Arc<dyn EventSink>,
+    event: AgentEvent,
+    ids: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    if let AgentEvent::ToolCall(call) = &event
+        && (call.name.is_empty() || !call.arguments.is_object() || !ids.insert(call.id.clone()))
+    {
+        return Err(incomplete());
+    }
+    sink.emit(event).await
 }
 
 /// Thin wrapper: drive [`stream_items`] over a live HTTP response's byte stream.
@@ -526,6 +690,19 @@ pub(crate) async fn stream_sse(
     sink: &Arc<dyn EventSink>,
     parse: impl Fn(&str) -> Vec<SseItem>,
 ) -> Result<StopReason> {
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .or_else(|| resp.headers().get("request-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    if request_id.is_some() {
+        sink.emit(AgentEvent::Metadata(manch_protocol::ProviderMetadata {
+            request_id,
+            ..Default::default()
+        }))
+        .await?;
+    }
     stream_items(resp.bytes_stream(), sink, parse).await
 }
 
@@ -576,8 +753,118 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interleaved_call_ends_cannot_reorder_issue_order() {
+        let mut accum = ToolAccum::default();
+        for index in [0, 1] {
+            accum.apply(SseItem::ToolCallStart {
+                index,
+                id: format!("c{index}"),
+                name: "echo".into(),
+                provider_meta: None,
+            });
+        }
+        assert!(accum.apply(SseItem::ToolCallEnd { index: 1 }).is_none());
+        let AgentEvent::ToolCall(first) = accum.apply(SseItem::ToolCallEnd { index: 0 }).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(first.id, "c0");
+        let remaining = accum.flush();
+        assert!(matches!(remaining.as_slice(),[AgentEvent::ToolCall(second)] if second.id=="c1"));
+    }
+
+    #[test]
+    fn multiline_sse_data_is_one_complete_event() {
+        let mut bytes = b"data: first\r\ndata: second\r\n\r\n".to_vec();
+        let items = drain_sse(&mut bytes, |data| vec![SseItem::Text(data.to_owned())]);
+        assert!(matches!(items.as_slice(),[SseItem::Text(text)] if text=="first\nsecond"));
+    }
+
+    #[test]
+    fn generated_call_ids_do_not_repeat_between_rounds() {
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let mut accum = ToolAccum::default();
+            accum.apply(SseItem::ToolCallStart {
+                index: 0,
+                id: String::new(),
+                name: "echo".into(),
+                provider_meta: None,
+            });
+            let AgentEvent::ToolCall(call) =
+                accum.apply(SseItem::ToolCallEnd { index: 0 }).unwrap()
+            else {
+                panic!()
+            };
+            ids.push(call.id);
+        }
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn invalid_utf8_is_not_silently_replaced() {
+        let mut bytes = b"data: ".to_vec();
+        bytes.extend_from_slice(&[0xff, b'\n', b'\n']);
+        let items = drain_sse(&mut bytes, |text| vec![SseItem::Text(text.to_owned())]);
+        assert!(matches!(items.first(), Some(SseItem::Error(_))));
+    }
+
+    #[test]
+    fn openai_flush_preserves_start_order() {
+        let mut accum = ToolAccum::default();
+        for index in (0..32).rev() {
+            accum.apply(SseItem::ToolCallStart {
+                index,
+                id: format!("c{index}"),
+                name: "search".into(),
+                provider_meta: None,
+            });
+        }
+        let ids: Vec<_> = accum
+            .flush()
+            .into_iter()
+            .map(|ev| match ev {
+                AgentEvent::ToolCall(call) => call.id,
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            (0..32)
+                .rev()
+                .map(|index| format!("c{index}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "gemini")]
+    #[tokio::test]
+    async fn parallel_calls_keep_issue_order_and_distinct_ids() {
+        let collect = CollectSink::default();
+        let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
+        let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"search\",\"args\":{\"q\":1}}}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"search\",\"args\":{\"q\":2}}}]},\"finishReason\":\"STOP\"}]}\n\n"
+        ))]);
+        stream_items(chunks, &sink, crate::gemini::parse_line)
+            .await
+            .unwrap();
+        let calls: Vec<_> = collect
+            .events()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                AgentEvent::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[0].id, calls[1].id);
+        assert_eq!(calls[0].arguments, serde_json::json!({"q":1}));
+        assert_eq!(calls[1].arguments, serde_json::json!({"q":2}));
+    }
+
+    #[test]
     fn drain_sse_extracts_data_lines_and_leaves_partial() {
-        let mut buf = b"data: {\"t\":1}\ndata: partial".to_vec();
+        let mut buf = b"data: {\"t\":1}\n\ndata: partial".to_vec();
         let items = drain_sse(&mut buf, |d| vec![SseItem::Text(d.to_string())]);
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], SseItem::Text(s) if s == "{\"t\":1}"));
@@ -746,7 +1033,7 @@ mod tests {
         let collect = CollectSink::default();
         let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
         let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(
-            b"data: start\ndata: args\n",
+            b"data: start\n\ndata: args\n\ndata: done\n\n",
         ))]);
         let parse = |data: &str| -> Vec<SseItem> {
             match data {
@@ -756,6 +1043,7 @@ mod tests {
                     name: "search".into(),
                     provider_meta: None,
                 }],
+                "done" => vec![SseItem::Stop(StopReason::EndTurn)],
                 "args" => vec![SseItem::ToolCallArgs {
                     index: 0,
                     json: "{\"q\":1}".into(),
@@ -784,27 +1072,6 @@ mod tests {
     async fn list_models_rejects_unknown_provider() {
         let e = super::list_models("nope", "k").await.unwrap_err();
         assert!(matches!(e, manch_protocol::Error::NotFound(_)));
-    }
-
-    #[test]
-    fn error_message_surfaces_json_error() {
-        let msg = error_message(
-            "openai",
-            reqwest::StatusCode::BAD_REQUEST,
-            r#"{"error":{"message":"bad key"}}"#,
-        );
-        assert_eq!(msg, "openai: bad key");
-    }
-
-    #[test]
-    fn error_message_falls_back_on_non_json_body() {
-        // A proxy's HTML 502 must not be masked by a JSON decode error.
-        let msg = error_message(
-            "gemini",
-            reqwest::StatusCode::BAD_GATEWAY,
-            "<html>502 Bad Gateway</html>",
-        );
-        assert_eq!(msg, "gemini: HTTP 502 Bad Gateway");
     }
 
     #[test]
@@ -871,7 +1138,13 @@ mod tests {
     #[test]
     fn item_to_event_turns_an_error_item_into_a_turn_error() {
         let e = item_to_event(SseItem::Error("openai: boom".into())).unwrap_err();
-        assert!(e.to_string().contains("boom"));
+        assert!(matches!(
+            e,
+            manch_protocol::Error::Provider {
+                kind: manch_protocol::ProviderFailureKind::Stream,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -921,7 +1194,7 @@ mod tests {
         let collect = CollectSink::default();
         let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
         let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(
-            b"data: text\ndata: cut\n",
+            b"data: text\n\ndata: cut\n\n",
         ))]);
         let parse = |data: &str| -> Vec<SseItem> {
             match data {
@@ -943,14 +1216,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_that_says_nothing_still_ends_normally() {
+    async fn a_stream_that_says_nothing_is_incomplete() {
         let collect = CollectSink::default();
         let sink: Arc<dyn EventSink> = Arc::new(collect.clone());
-        let chunks = futures_util::stream::iter(vec![Ok(bytes::Bytes::from_static(b"data: t\n"))]);
-        let parse = |_: &str| -> Vec<SseItem> { vec![SseItem::Text("hi".into())] };
-        assert_eq!(
-            stream_items(chunks, &sink, parse).await.unwrap(),
-            StopReason::EndTurn
-        );
+        let chunks = futures_util::stream::iter(Vec::<
+            std::result::Result<bytes::Bytes, reqwest::Error>,
+        >::new());
+        assert!(stream_items(chunks, &sink, |_| vec![]).await.is_err());
+        assert!(collect.events().is_empty());
     }
 }

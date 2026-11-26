@@ -67,9 +67,10 @@ pub mod acp {
         BlobResourceContents, Content, ContentBlock, ContentChunk, EmbeddedResource,
         EmbeddedResourceResource, ImageContent, PermissionOption, PermissionOptionId,
         PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
-        RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
-        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-        ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
+        SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, StopReason,
+        TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind,
     };
 }
 
@@ -94,6 +95,14 @@ pub use tool::{Extensions, Tier, Tool, ToolContext, ToolInvocation, ToolOutcome,
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Safe provider diagnostics. Response bodies, credentials and request URLs
+    /// deliberately have no place in this error.
+    #[error("{provider}: {kind:?} (HTTP {status:?})")]
+    Provider {
+        provider: String,
+        status: Option<u16>,
+        kind: ProviderFailureKind,
+    },
     /// A requested agent / tool / channel id was not registered.
     #[error("not found: {0}")]
     NotFound(String),
@@ -118,6 +127,19 @@ pub enum Error {
     /// The underlying agent, transport, or store failed.
     #[error("{0}")]
     Other(String),
+}
+
+/// Failure categories a host can handle without parsing provider prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProviderFailureKind {
+    Authentication,
+    RateLimit,
+    Server,
+    InvalidRequest,
+    Transport,
+    Stream,
+    Incomplete,
 }
 
 /// Convenience alias for fallible Manch operations.
@@ -159,12 +181,14 @@ pub struct Context {
     pub turns: Vec<Turn>,
 }
 
-/// Token counts reported by a provider for a turn. Both fields are optional
+/// Token counts reported by a provider for a turn. All fields are optional
 /// because the three provider dialects report them at different moments and not
 /// always together — Anthropic sends input at `message_start` and output at
 /// `message_delta`, Gemini repeats a running total per chunk, OpenAI sends one
 /// final block. Manch forwards what it is told and does not accumulate; a
-/// consumer that needs a running total sums the events it receives.
+/// consumer must retain the latest known value for each field, never sum
+/// repeated observations. Each observation is cumulative for its fields in
+/// this invocation; absent fields do not erase previously reported values.
 ///
 /// The field names are [ACP's own](https://agentclientprotocol.com) — its
 /// `Usage` carries exactly `total_tokens`, `input_tokens`, `output_tokens`,
@@ -203,6 +227,17 @@ pub struct Usage {
     pub cached_write_tokens: Option<u64>,
 }
 
+/// Identity observations for a single provider invocation. Missing identifiers
+/// remain unknown; requested and reported model names are separate facts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderMetadata {
+    pub provider: Option<String>,
+    pub requested_model: Option<String>,
+    pub reported_model: Option<String>,
+    pub response_id: Option<String>,
+    pub request_id: Option<String>,
+}
+
 /// A streamed unit of progress from an [`Agent`] during a turn.
 ///
 /// `ToolInvocation` is intentionally small (id/name/args); `acp::SessionUpdate`
@@ -214,6 +249,8 @@ pub struct Usage {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum AgentEvent {
+    /// Safe identity fields, separate from content and usage observations.
+    Metadata(ProviderMetadata),
     /// A streamed update in ACP's own vocabulary (content chunk, tool-call
     /// status, plan, …). Forwarded verbatim to the originating [`Channel`]/UI.
     Update(acp::SessionUpdate),

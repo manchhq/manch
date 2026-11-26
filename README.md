@@ -199,14 +199,11 @@ Found during implementation; documented rather than hidden.
   sink before the batch's fate is known. A UI driven off that stream can
   therefore show a call as completed that, moments later, corresponds to
   nothing in the persisted transcript.
-- **Gemini tool-call ids are synthesised, and repeat calls are paired by
-  order, not identity.** Gemini's wire format supplies no call id, so Manch
-  synthesises one from the part's position in the response. Gemini also keys
-  `functionResponse` (the result) by tool *name*, not by id — so when one turn
-  calls the same tool twice, which result belongs to which call is genuinely
-  ambiguous on Gemini's own wire. Manch preserves issue order (never
-  reordering or merging), which is the best available reading, not a
-  guaranteed-correct one.
+- **Provider capabilities are model-specific.** The provider layer keeps unknown
+  catalog flags unknown and requires explicit host policy for optional generation
+  controls. Grounding and structured-output specialist parity remain tracked in
+  [#79](https://github.com/manchhq/manch/issues/79). See the
+  [integration contract and capability matrix](docs/provider-integration.md).
 
 ### The BYOK completion layer: thin hand-rolled clients, not a framework
 
@@ -266,9 +263,17 @@ let models = manch_llm::list_models_at("openai", &key, Some(agent.base())).await
 **Token usage.** Providers report token counts differently — Anthropic splits
 input and output across two frames, Gemini repeats a running total per chunk,
 OpenAI sends one final block (and only when asked). Manch normalises them to
-`AgentEvent::Usage` and forwards them as they arrive without accumulating. This
-is for display, never for billing: a managed tier meters at its own proxy rather
-than trusting a client-side total.
+`AgentEvent::Usage` as cumulative observations per reported field. Retain the
+latest known value; never sum repeated frames. The completion collector supplies
+one final normalized observation and retains partial usage on failure. The host
+owns accounting policy and persistence. See the
+[integration contract](docs/provider-integration.md) for exact count semantics.
+
+**Embedding without the runtime.** `manch-llm` plus `manch-protocol` supports
+single-round collection, reusable authenticated transport, typed generation
+policy and host-owned tool continuation. Start with the
+[host example](crates/manch-llm/examples/host_round.rs) and
+[integration guide](docs/provider-integration.md).
 
 **Provider roadmap:** Anthropic → OpenAI → OpenAI-compatible (lights up
 xAI / Groq / Together / Fireworks / vLLM / LiteLLM at once) → Gemini, Ollama →

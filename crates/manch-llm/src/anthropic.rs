@@ -22,6 +22,7 @@ pub struct AnthropicAgent {
     max_output_tokens: u32,
     cache_system_prompt: bool,
     http: crate::http::Http,
+    generation: Option<(crate::GenerationOptions, crate::ModelPolicy)>,
 }
 
 impl AnthropicAgent {
@@ -33,6 +34,7 @@ impl AnthropicAgent {
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
             cache_system_prompt: true,
             http: crate::http::Http::default(),
+            generation: None,
         }
     }
     /// Mark the end of the system block as a prompt-cache breakpoint. On by
@@ -50,6 +52,32 @@ impl AnthropicAgent {
     #[must_use]
     pub fn cache_system_prompt(mut self, on: bool) -> Self {
         self.cache_system_prompt = on;
+        self
+    }
+
+    /// Configure generation against the host's verified exact-model policy.
+    pub fn generation_options(
+        mut self,
+        options: crate::GenerationOptions,
+        policy: crate::ModelPolicy,
+    ) -> Result<Self> {
+        self.max_output_tokens = crate::generation::configure(
+            "anthropic",
+            &self.model,
+            self.max_output_tokens,
+            &options,
+            &policy,
+        )?;
+        self.generation = Some((options, policy));
+        Ok(self)
+    }
+
+    /// Reuse a host-configured connection pool. The supplied client owns its
+    /// timeout, redirect and low-level retry policies. Calling a timeout builder
+    /// afterwards creates a new client; `max_retries` keeps this pool intact.
+    #[must_use]
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http = self.http.with_client(client);
         self
     }
 
@@ -247,7 +275,7 @@ fn turn_content(turn: &Turn) -> serde_json::Value {
 /// What Anthropic's Messages API can encode from a `Resource` blob: images,
 /// and the two document media types its `document` block accepts.
 fn unsupported_content(turns: &[Turn]) -> Option<String> {
-    crate::unsupported_resource(turns, |mime| {
+    crate::unsupported_resource(turns, false, |mime| {
         mime.starts_with("image/") || mime == "application/pdf" || mime == "text/plain"
     })
 }
@@ -323,9 +351,26 @@ pub(crate) fn request_body(
 /// Parse one SSE `data:` payload into text or a surfaced error. Pure.
 pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
-        return Vec::new();
+        return vec![SseItem::Error("malformed provider frame".into())];
     };
     let mut out = Vec::new();
+    let identity = v.get("message").unwrap_or(&v);
+    let response_id = identity
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let reported_model = identity
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if response_id.is_some() || reported_model.is_some() {
+        out.push(SseItem::Metadata(manch_protocol::ProviderMetadata {
+            response_id,
+            reported_model,
+            ..Default::default()
+        }));
+    }
+
     match v.get("type").and_then(|t| t.as_str()) {
         Some("content_block_start") => {
             if let Some(index) = v.get("index").and_then(|i| i.as_u64())
@@ -389,13 +434,6 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
             // The only frame carrying Anthropic's verdict. Discarding it made a
             // turn cut off at `max_tokens` indistinguishable from one that
             // finished — the text simply stopped.
-            if let Some(r) = v
-                .get("delta")
-                .and_then(|d| d.get("stop_reason"))
-                .and_then(|r| r.as_str())
-            {
-                out.push(SseItem::Stop(crate::stop_reason(r)));
-            }
             // The closing frame carries only the output total; input was reported
             // at message_start and must not be re-asserted as absent.
             if let Some(u) = v.get("usage") {
@@ -414,14 +452,21 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
                     thought_tokens: None,
                 }));
             }
+            if let Some(r) = v
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|r| r.as_str())
+            {
+                out.push(crate::stop_item(r));
+            }
         }
         Some("error") => {
-            let msg = v
+            let _msg = v
                 .get("error")
                 .and_then(|e| e.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("stream error");
-            out.push(SseItem::Error(format!("anthropic: {msg}")));
+            out.push(SseItem::Error("anthropic: stream failed".to_string()));
         }
         _ => {}
     }
@@ -465,9 +510,9 @@ pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<Mod
     let base = crate::resolve_base("anthropic", base, DEFAULT_BASE);
     let http = crate::http::shared();
     let resp = http
-        .client()
+        .client()?
         .get(models_url(&base))
-        .header("x-api-key", api_key)
+        .header("x-api-key", crate::http::secret_header(api_key)?)
         .header("anthropic-version", VERSION)
         .send()
         .await;
@@ -486,26 +531,42 @@ impl Agent for AnthropicAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
+        sink.emit(manch_protocol::AgentEvent::Metadata(
+            manch_protocol::ProviderMetadata {
+                provider: Some("anthropic".to_string()),
+                requested_model: Some(self.model.clone()),
+                ..Default::default()
+            },
+        ))
+        .await?;
         if let Some(why) = unsupported_content(&ctx.turns) {
             return Err(manch_protocol::Error::Unsupported(format!(
                 "anthropic: {why}"
             )));
         }
+        let mut body = request_body(
+            &self.model,
+            &ctx.turns,
+            tools,
+            self.max_output_tokens,
+            self.cache_system_prompt,
+        );
+        crate::generation::apply(
+            &mut body,
+            "anthropic",
+            &self.model,
+            self.max_output_tokens,
+            &self.generation,
+        )?;
         let resp = self
             .http
             .send(
                 self.http
-                    .client()
+                    .client()?
                     .post(messages_url(&self.base))
-                    .header("x-api-key", &self.api_key)
+                    .header("x-api-key", crate::http::secret_header(&self.api_key)?)
                     .header("anthropic-version", VERSION)
-                    .json(&request_body(
-                        &self.model,
-                        &ctx.turns,
-                        tools,
-                        self.max_output_tokens,
-                        self.cache_system_prompt,
-                    )),
+                    .json(&body),
             )
             .await?;
 
@@ -660,7 +721,7 @@ mod tests {
     fn parse_line_surfaces_stream_error() {
         let d = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
         assert!(
-            matches!(parse_line(d).as_slice(), [crate::SseItem::Error(e)] if e == "anthropic: Overloaded")
+            matches!(parse_line(d).as_slice(), [crate::SseItem::Error(e)] if e == "anthropic: stream failed")
         );
     }
 
@@ -1029,7 +1090,7 @@ mod tests {
             entries: vec![doc(None, "JVBERi0=")],
         };
         let why = unsupported_content(&[turn]).expect("an undeclared blob must be refused");
-        assert!(why.contains("no declared media type"), "got {why}");
+        assert!(why.contains("cannot be represented"), "got {why}");
     }
 
     #[test]
