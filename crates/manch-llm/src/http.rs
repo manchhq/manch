@@ -9,8 +9,6 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::err;
-
 /// Time allowed to establish a connection. Short: failing to connect is a fast,
 /// unambiguous failure, and waiting longer never turns it into a success.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,7 +41,7 @@ const BACKOFF_BASE: Duration = Duration::from_millis(500);
 /// OCR fan-out that is a real cost, repeated, for nothing.
 #[derive(Debug, Clone)]
 pub(crate) struct Http {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     connect_timeout: Duration,
     read_timeout: Duration,
     max_retries: u32,
@@ -60,17 +58,33 @@ impl Default for Http {
 }
 
 impl Http {
+    pub(crate) fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
     fn build(connect_timeout: Duration, read_timeout: Duration, max_retries: u32) -> Self {
         crate::ensure_crypto_provider();
-        let client = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .read_timeout(read_timeout)
-            .build()
-            // The builder only fails on TLS/resolver setup, which
-            // `Client::new()` would hit identically — so falling back keeps a
-            // construction path that cannot panic, rather than pretending the
-            // error is actionable here.
-            .unwrap_or_else(|_| reqwest::Client::new());
+        Self::from_builder(
+            reqwest::Client::builder()
+                .retry(reqwest::retry::never())
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(connect_timeout)
+                .read_timeout(read_timeout),
+            connect_timeout,
+            read_timeout,
+            max_retries,
+        )
+    }
+
+    fn from_builder(
+        builder: reqwest::ClientBuilder,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        max_retries: u32,
+    ) -> Self {
+        // Keep construction failure; never silently replace the configured
+        // security/timeout policy with Client::new() defaults.
+        let client = builder.build().ok();
         Self {
             client,
             connect_timeout,
@@ -97,8 +111,14 @@ impl Http {
         self
     }
 
-    pub(crate) fn client(&self) -> &reqwest::Client {
-        &self.client
+    pub(crate) fn client(&self) -> manch_protocol::Result<&reqwest::Client> {
+        self.client.as_ref().ok_or_else(|| {
+            crate::provider_failure(
+                "transport",
+                None,
+                manch_protocol::ProviderFailureKind::Transport,
+            )
+        })
     }
 
     /// Send a request, retrying the statuses worth retrying.
@@ -125,9 +145,9 @@ impl Http {
                     let wait = retry_after(resp.headers()).unwrap_or_else(|| backoff(attempt));
                     tokio::time::sleep(wait).await;
                 }
-                // A connect or read timeout on the way to the headers is worth
-                // one more try; anything else is the provider's answer.
-                Err(e) if remaining > 0 && (e.is_timeout() || e.is_connect()) => {
+                // Only connection-establishment failures are safe to replay.
+                // A header read timeout may follow an accepted/billable request.
+                Err(e) if remaining > 0 && e.is_connect() => {
                     tokio::time::sleep(backoff(attempt)).await;
                 }
                 Ok(resp) => return Ok(resp),
@@ -179,15 +199,51 @@ pub(crate) fn backoff(attempt: u32) -> Duration {
 /// handling, and a host cannot tell them apart from a string.
 pub(crate) fn transport_err(e: reqwest::Error) -> manch_protocol::Error {
     if e.is_timeout() {
-        manch_protocol::Error::Timeout(e.to_string())
+        manch_protocol::Error::Timeout("provider request stalled".into())
     } else {
-        err(e)
+        crate::provider_failure(
+            "transport",
+            None,
+            manch_protocol::ProviderFailureKind::Transport,
+        )
     }
+}
+
+/// Mark provider auth values sensitive, including vendors using custom headers.
+pub(crate) fn secret_header(key: &str) -> manch_protocol::Result<reqwest::header::HeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(key).map_err(|_| {
+        crate::provider_failure(
+            "authentication",
+            None,
+            manch_protocol::ProviderFailureKind::InvalidRequest,
+        )
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn construction_failure_is_retained_instead_of_using_default_policy() {
+        crate::ensure_crypto_provider();
+        let http = Http::from_builder(
+            reqwest::Client::builder().user_agent("\n"),
+            DEFAULT_CONNECT_TIMEOUT,
+            DEFAULT_READ_TIMEOUT,
+            0,
+        );
+        let error = http.client().unwrap_err();
+        assert!(matches!(
+            error,
+            manch_protocol::Error::Provider {
+                kind: manch_protocol::ProviderFailureKind::Transport,
+                ..
+            }
+        ));
+    }
     use reqwest::StatusCode;
     use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
 

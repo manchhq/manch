@@ -37,7 +37,7 @@ fn ask() -> Context {
     }
 }
 
-const OK_SSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const OK_SSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 67\r\nConnection: close\r\n\r\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
 
 /// Serve `script` in order, one response per connection, counting requests.
 /// The last entry repeats once the script runs out. `None` means "accept the

@@ -29,6 +29,7 @@ pub struct GeminiAgent {
     base: String,
     max_output_tokens: u32,
     http: crate::http::Http,
+    generation: Option<(crate::GenerationOptions, crate::ModelPolicy)>,
 }
 
 impl GeminiAgent {
@@ -39,8 +40,35 @@ impl GeminiAgent {
             base: crate::resolve_base("gemini", None, DEFAULT_BASE),
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
             http: crate::http::Http::default(),
+            generation: None,
         }
     }
+    /// Configure generation against the host's verified exact-model policy.
+    pub fn generation_options(
+        mut self,
+        options: crate::GenerationOptions,
+        policy: crate::ModelPolicy,
+    ) -> Result<Self> {
+        self.max_output_tokens = crate::generation::configure(
+            "gemini",
+            &self.model,
+            self.max_output_tokens,
+            &options,
+            &policy,
+        )?;
+        self.generation = Some((options, policy));
+        Ok(self)
+    }
+
+    /// Reuse a host-configured connection pool. The supplied client owns its
+    /// timeout, redirect and low-level retry policies. Calling a timeout builder
+    /// afterwards creates a new client; `max_retries` keeps this pool intact.
+    #[must_use]
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http = self.http.with_client(client);
+        self
+    }
+
     /// Time allowed to establish a connection. See
     /// [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT).
     #[must_use]
@@ -141,37 +169,32 @@ fn tool_result_text(content: &[ToolCallContent]) -> String {
         .join("\n")
 }
 
-/// Resolve a `ToolResult.id` back to the tool name Gemini's wire needs, by
-/// scanning the immediately preceding assistant turn's `Entry::ToolCall`
-/// entries for a matching id.
-///
-/// This lookup is exact — Manch's own turns still carry the id that pairs a
-/// result with its call. The genuine ambiguity is downstream of this
-/// function: Gemini's `functionResponse` carries only a `name`, no id, so if
-/// the same tool was called twice in one turn, the two resulting response
-/// parts are indistinguishable to Gemini once encoded. Nothing on this side
-/// can repair that — the best this function (and `request_body`) can do is
-/// preserve issue order, so response N lines up positionally with call N of
-/// that name.
-fn resolve_tool_name(turns: &[Turn], result_turn_index: usize, id: &str) -> Option<String> {
-    let assistant_turn = result_turn_index
-        .checked_sub(1)
-        .and_then(|i| turns.get(i))?;
-    assistant_turn.entries.iter().find_map(|e| match e {
-        Entry::ToolCall(ToolInvocation {
-            id: call_id, name, ..
-        }) if call_id == id => Some(name.clone()),
-        _ => None,
-    })
+/// Resolve a result against the nearest preceding matching invocation. Read
+/// its name and native replay metadata from the same call, including when
+/// results span several user turns or a saved history reuses an ID. Providers
+/// without native IDs still depend on preserved issue order on their wire.
+fn resolve_tool_call<'a>(
+    turns: &'a [Turn],
+    result_turn_index: usize,
+    id: &str,
+) -> Option<&'a ToolInvocation> {
+    turns
+        .iter()
+        .take(result_turn_index)
+        .rev()
+        .flat_map(|turn| turn.entries.iter().rev())
+        .find_map(|entry| match entry {
+            Entry::ToolCall(call) if call.id == id => Some(call),
+            _ => None,
+        })
 }
 
 /// Map one turn entry onto a Gemini `parts` entry. `turns`/`turn_index` are
 /// needed only to resolve a `ToolResult`'s id back to its tool name (see
-/// [`resolve_tool_name`]).
+/// [`resolve_tool_call`]).
 ///
-/// `ContentBlock::Audio` and the two resource variants are still dropped —
-/// Gemini can carry audio inline, but ACP's `AudioContent` and Gemini's
-/// accepted formats are not the same set, and guessing is worse than omitting.
+/// Preflight rejects unsupported blocks, including audio, before this mapper.
+/// Prepared resource links use fileData; binary image/PDF resources use inlineData.
 fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_json::Value> {
     match entry {
         Entry::Block(ContentBlock::Text(t)) => Some(serde_json::json!({ "text": t.text })),
@@ -180,6 +203,9 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
         // spelling; mixing both in one request body would only invite doubt.
         Entry::Block(ContentBlock::Image(i)) => Some(serde_json::json!({
             "inlineData": { "mimeType": i.mime_type, "data": i.data },
+        })),
+        Entry::Block(ContentBlock::ResourceLink(link)) => Some(serde_json::json!({
+            "fileData": {"mimeType":link.mime_type,"fileUri":link.uri,"displayName":link.name},
         })),
         // Gemini takes a PDF through the *same* `inlineData` shape as an
         // image — only the media type differs. Confirmed against the live API
@@ -210,19 +236,32 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
                 (provider_meta, part.as_object_mut())
             {
                 for (k, v) in meta {
-                    obj.insert(k.clone(), v.clone());
+                    if k == "callId" {
+                        obj.get_mut("functionCall").unwrap()["id"] = v.clone();
+                    } else if k == "thoughtSignature" {
+                        obj.insert(k.clone(), v.clone());
+                    }
                 }
             }
             Some(part)
         }
         Entry::ToolResult { id, content, .. } => {
-            let name = resolve_tool_name(turns, turn_index, id).unwrap_or_else(|| id.clone());
-            Some(serde_json::json!({
+            let call = resolve_tool_call(turns, turn_index, id)?;
+            let name = &call.name;
+            let mut part = serde_json::json!({
                 "functionResponse": {
                     "name": name,
                     "response": { "result": tool_result_text(content) },
                 },
-            }))
+            });
+            if let Some(call_id) = call
+                .provider_meta
+                .as_ref()
+                .and_then(|meta| meta.get("callId"))
+            {
+                part["functionResponse"]["id"] = call_id.clone();
+            }
+            Some(part)
         }
     }
 }
@@ -231,7 +270,13 @@ fn entry_part(entry: &Entry, turns: &[Turn], turn_index: usize) -> Option<serde_
 /// also accepts audio and video inline, but nothing maps those yet, so
 /// claiming them here would refuse nothing and promise something untrue.
 fn unsupported_content(turns: &[Turn]) -> Option<String> {
-    crate::unsupported_resource(turns, |mime| {
+    for (index, turn) in turns.iter().enumerate() {
+        if turn.entries.iter().any(|entry|matches!(entry,Entry::ToolResult{id,..} if resolve_tool_call(turns,index,id).is_none())) {
+            return Some("tool result has no matching preceding invocation".into());
+        }
+    }
+
+    crate::unsupported_resource(turns, true, |mime| {
         mime.starts_with("image/") || mime == "application/pdf"
     })
 }
@@ -261,7 +306,7 @@ fn turn_parts(turn: &Turn, turns: &[Turn], turn_index: usize) -> Vec<serde_json:
 /// array is not the same fact to a model as no tools being registered.
 ///
 /// Encoding a `ToolResult` requires resolving its id back to a tool *name*
-/// (see [`resolve_tool_name`]) because Gemini keys `functionResponse` by name,
+/// (see [`resolve_tool_call`]) because Gemini keys `functionResponse` by name,
 /// not id. When the same tool is called twice in one turn, the resulting wire
 /// representation is genuinely ambiguous — two `functionResponse` parts with
 /// the same name, and no id to tell them apart — which is a limitation of
@@ -315,79 +360,31 @@ pub(crate) fn request_body(
 /// Parse one SSE line: concatenate the candidate's text parts, or surface an error. Pure.
 pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
-        return Vec::new();
+        return vec![SseItem::Error("malformed provider frame".into())];
     };
-    if let Some(msg) = v
+    if let Some(_msg) = v
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(|m| m.as_str())
     {
-        return vec![SseItem::Error(format!("gemini: {msg}"))];
+        return vec![SseItem::Error("gemini: stream failed".to_string())];
     }
     let mut out = Vec::new();
-    if let Some(reason) = v
-        .get("candidates")
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("finishReason"))
-        .and_then(|r| r.as_str())
-    {
-        out.push(SseItem::Stop(crate::stop_reason(reason)));
-    }
-    let parts = v
-        .get("candidates")
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.as_array());
-
-    if let Some(parts) = parts {
-        let text: String = parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-            .collect();
-        if !text.is_empty() {
-            out.push(SseItem::Text(text));
-        }
-
-        // A `functionCall` arrives complete in a single part — unlike
-        // Anthropic/OpenAI, there is no fragmentation across frames — so one
-        // part yields a start/args/end triple in one shot, and Gemini
-        // supplies no call id, so one is synthesised from the part's
-        // position so a repeat call in the same turn still gets a distinct id.
-        for (index, part) in parts.iter().enumerate() {
-            let Some(call) = part.get("functionCall") else {
-                continue;
-            };
-            let index = index as u32;
-            let name = call
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let args = call.get("args").cloned().unwrap_or(serde_json::json!({}));
-            let id = format!("gemini-{name}-{index}");
-            // Thinking models attach a `thoughtSignature` to the call and reject
-            // the NEXT turn unless it comes back verbatim. It is a sibling of
-            // `functionCall` on the part, not a field inside it. Captured under
-            // its own key so the rebuild can echo it without Manch's protocol
-            // ever learning what it means.
-            let provider_meta = part
-                .get("thoughtSignature")
-                .map(|sig| serde_json::json!({ "thoughtSignature": sig }));
-            out.push(SseItem::ToolCallStart {
-                index,
-                id,
-                name: name.clone(),
-                provider_meta,
-            });
-            out.push(SseItem::ToolCallArgs {
-                index,
-                json: args.to_string(),
-            });
-            out.push(SseItem::ToolCallEnd { index });
-        }
+    let identity = &v;
+    let response_id = identity
+        .get("responseId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let reported_model = identity
+        .get("modelVersion")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if response_id.is_some() || reported_model.is_some() {
+        out.push(SseItem::Metadata(manch_protocol::ProviderMetadata {
+            response_id,
+            reported_model,
+            ..Default::default()
+        }));
     }
 
     if let Some(u) = v.get("usageMetadata") {
@@ -402,6 +399,99 @@ pub(crate) fn parse_line(data: &str) -> Vec<SseItem> {
             // Gemini caches implicitly; there is no write count on the wire.
             cached_write_tokens: None,
         }));
+    }
+    let parts = v
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array());
+
+    if let Some(parts) = parts {
+        let text: String = parts
+            .iter()
+            .filter(|p| p.get("thought").and_then(|v| v.as_bool()) != Some(true))
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if !text.is_empty() {
+            out.push(SseItem::Text(text));
+        }
+        for part in parts {
+            if part.get("thought").and_then(|v| v.as_bool()) == Some(true)
+                && let Some(text) = part.get("text").and_then(|v| v.as_str())
+            {
+                out.push(SseItem::Thought(text.to_string()));
+            }
+        }
+
+        // A `functionCall` arrives complete in a single part — unlike
+        // Anthropic/OpenAI, there is no fragmentation across frames — so one
+        // part yields a start/args/end triple in one shot, and Gemini
+        // may omit call IDs. Empty IDs are allocated by the stream-lifetime
+        // accumulator; native IDs remain verbatim.
+        for (index, part) in parts.iter().enumerate() {
+            let Some(call) = part.get("functionCall") else {
+                continue;
+            };
+            let index = index as u32;
+            let name = call
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let args = call.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let id = call
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            // Thinking models attach a `thoughtSignature` to the call and reject
+            // the NEXT turn unless it comes back verbatim. It is a sibling of
+            // `functionCall` on the part, not a field inside it. Captured under
+            // its own key so the rebuild can echo it without Manch's protocol
+            // ever learning what it means.
+            let mut provider_meta = part
+                .get("thoughtSignature")
+                .map(|sig| serde_json::json!({ "thoughtSignature": sig }));
+            if !id.is_empty() {
+                provider_meta.get_or_insert_with(|| serde_json::json!({}))["callId"] =
+                    serde_json::json!(id);
+            }
+            out.push(SseItem::ToolCallStart {
+                index,
+                id,
+                name: name.clone(),
+                provider_meta,
+            });
+            out.push(SseItem::ToolCallArgs {
+                index,
+                json: args.to_string(),
+            });
+            out.push(SseItem::ToolCallEnd { index });
+        }
+    }
+
+    if let Some(reason) = v
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|c| c.get("finishReason"))
+        .and_then(|r| r.as_str())
+    {
+        out.push(crate::stop_item(reason));
+    }
+    if let Some(reason) = v
+        .get("promptFeedback")
+        .and_then(|v| v.get("blockReason"))
+        .and_then(|v| v.as_str())
+    {
+        out.push(match reason {
+            "SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "IMAGE_SAFETY" => {
+                SseItem::Stop(StopReason::Refusal)
+            }
+            _ => SseItem::Error("unknown prompt block reason".into()),
+        });
     }
     out
 }
@@ -461,9 +551,9 @@ pub async fn list_models(api_key: &str) -> Result<Vec<ModelInfo>> {
 pub async fn list_models_at(api_key: &str, base: Option<&str>) -> Result<Vec<ModelInfo>> {
     let base = crate::resolve_base("gemini", base, DEFAULT_BASE);
     let resp = crate::http::shared()
-        .client()
+        .client()?
         .get(models_url(&base))
-        .header("x-goog-api-key", api_key)
+        .header("x-goog-api-key", crate::http::secret_header(api_key)?)
         .send()
         .await;
     crate::list_models_with(resp, FALLBACK_MODEL, parse_models).await
@@ -481,17 +571,33 @@ impl Agent for GeminiAgent {
         tools: &[ToolSchema],
         sink: Arc<dyn EventSink>,
     ) -> Result<StopReason> {
+        sink.emit(manch_protocol::AgentEvent::Metadata(
+            manch_protocol::ProviderMetadata {
+                provider: Some("gemini".to_string()),
+                requested_model: Some(self.model.clone()),
+                ..Default::default()
+            },
+        ))
+        .await?;
         if let Some(why) = unsupported_content(&ctx.turns) {
             return Err(manch_protocol::Error::Unsupported(format!("gemini: {why}")));
         }
+        let mut body = request_body(&ctx.turns, tools, self.max_output_tokens);
+        crate::generation::apply(
+            &mut body,
+            "gemini",
+            &self.model,
+            self.max_output_tokens,
+            &self.generation,
+        )?;
         let resp = self
             .http
             .send(
                 self.http
-                    .client()
+                    .client()?
                     .post(stream_url(&self.base, &self.model))
-                    .header("x-goog-api-key", &self.api_key)
-                    .json(&request_body(&ctx.turns, tools, self.max_output_tokens)),
+                    .header("x-goog-api-key", crate::http::secret_header(&self.api_key)?)
+                    .json(&body),
             )
             .await?;
 
@@ -505,6 +611,65 @@ impl Agent for GeminiAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thought_parts_never_reach_visible_text() {
+        let items = parse_line(
+            r#"{"candidates":[{"content":{"parts":[{"text":"private reasoning","thought":true},{"text":"public answer"},{"functionCall":{"name":"search","args":{}},"thoughtSignature":"sig-abc"}]}}]}"#,
+        );
+        let visible: String = items
+            .iter()
+            .filter_map(|item| match item {
+                SseItem::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible, "public answer");
+        assert!(items.iter().any(|item| matches!(item, SseItem::ToolCallStart {provider_meta: Some(meta), ..} if meta["thoughtSignature"] == "sig-abc")));
+    }
+
+    #[test]
+    fn native_call_ids_are_captured_and_replayed() {
+        let items = parse_line(
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-1","name":"search","args":{"q":1}},"thoughtSignature":"sig-1"}]}}]}"#,
+        );
+        let SseItem::ToolCallStart {
+            id, provider_meta, ..
+        } = &items[0]
+        else {
+            panic!()
+        };
+        assert_eq!(id, "native-1");
+        let turns = vec![
+            Turn {
+                role: Role::Assistant,
+                entries: vec![Entry::ToolCall(ToolInvocation {
+                    id: id.clone(),
+                    name: "search".into(),
+                    arguments: serde_json::json!({"q":1}),
+                    provider_meta: provider_meta.clone(),
+                })],
+            },
+            Turn {
+                role: Role::User,
+                entries: vec![Entry::ToolResult {
+                    id: id.clone(),
+                    content: vec![],
+                    raw_output: None,
+                }],
+            },
+        ];
+        let body = request_body(&turns, &[], 8192);
+        assert_eq!(
+            body["contents"][0]["parts"][0]["functionCall"]["id"],
+            "native-1"
+        );
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["id"],
+            "native-1"
+        );
+        assert_eq!(body["contents"][0]["parts"][0]["thoughtSignature"], "sig-1");
+    }
     use manch_protocol::acp::{ContentBlock, ImageContent, TextContent};
     use manch_protocol::{Entry, Role, Turn};
 
@@ -638,18 +803,6 @@ mod tests {
             part.get("thoughtSignature").is_none(),
             "absent means absent, not null: {part}"
         );
-    }
-
-    #[test]
-    fn a_gemini_call_gets_a_synthesised_id() {
-        let d = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{}}}]}}]}"#;
-        match parse_line(d).as_slice() {
-            [crate::SseItem::ToolCallStart { id, .. }, ..] => assert!(
-                !id.is_empty(),
-                "Gemini supplies no id; Manch must synthesise one so results can be paired"
-            ),
-            _ => panic!("expected a tool call start"),
-        }
     }
 
     #[test]
@@ -792,7 +945,7 @@ mod tests {
         let d = r#"{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7}}"#;
         let items = parse_line(d);
         assert!(matches!(items.as_slice(),
-            [crate::SseItem::Text(t), crate::SseItem::Usage(u)]
+            [crate::SseItem::Usage(u), crate::SseItem::Text(t)]
                 if t == "Hi" && u.input_tokens == Some(5) && u.output_tokens == Some(7)));
     }
 
@@ -830,7 +983,7 @@ mod tests {
     fn parse_line_surfaces_error() {
         let d = r#"{"error":{"code":400,"message":"bad key"}}"#;
         assert!(
-            matches!(parse_line(d).as_slice(), [crate::SseItem::Error(e)] if e == "gemini: bad key")
+            matches!(parse_line(d).as_slice(), [crate::SseItem::Error(e)] if e == "gemini: stream failed")
         );
     }
 
